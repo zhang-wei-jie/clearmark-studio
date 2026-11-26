@@ -19,8 +19,7 @@ export type MiganWorkerRequest =
       height: number;
       rgbaBuffer: ArrayBuffer;
       maskBuffer: ArrayBuffer;
-    }
-  | { type: 'dispose'; taskId: number };
+    };
 
 export type MiganWorkerResponse =
   | {
@@ -38,7 +37,6 @@ export type MiganWorkerResponse =
       height: number;
       rgbaBuffer: ArrayBuffer;
     }
-  | { type: 'disposed'; taskId: number }
   | { type: 'error'; taskId: number; message: string };
 
 interface MiganWorkerContextLike {
@@ -176,16 +174,6 @@ async function runInference(
 workerSelf.onmessage = async (event: MessageEvent<MiganWorkerRequest>) => {
   const req = event.data;
   if (!req) return;
-
-  if (req.type === 'dispose') {
-    const prev = session;
-    session = null;
-    if (prev) {
-      await prev.release().catch(() => undefined);
-    }
-    workerSelf.postMessage({ type: 'disposed', taskId: req.taskId });
-    return;
-  }
 
   try {
     const engine = await ensureSession(req.taskId);

@@ -291,7 +291,14 @@ function evaluateFullScore(
   return Math.min(m0, m1) * 0.55 + (m0 + m1) * 0.225;
 }
 
-function inferCorner(x: number, y: number, bw: number, bh: number, imgW: number, imgH: number): ScannedCorner {
+function inferCorner(
+  x: number,
+  y: number,
+  bw: number,
+  bh: number,
+  imgW: number,
+  imgH: number,
+): ScannedCorner {
   const cx = x + bw * 0.5;
   const cy = y + bh * 0.5;
   if (cy >= imgH * 0.5) {
@@ -312,34 +319,42 @@ function boxesOverlapRatio(a: MatchedWatermark, b: MatchedWatermark): number {
 }
 
 /**
- * 对同一位置的重复候选执行非极大值抑制，并优先保留覆盖更完整的版本后缀模板（如 kling30 覆盖 kling）
+ * 对同一位置的重复候选执行非极大值抑制，并优先保留覆盖更完整的版本后缀模板（如 kling30 覆盖 kling）。
+ * 排序阶段仅使用严格弱序比较器，避免非传递比较导致排序结果不确定。
  */
-function deduplicateMatches(candidates: MatchedWatermark[]): MatchedWatermark[] {
+export function deduplicateMatches(candidates: readonly MatchedWatermark[]): MatchedWatermark[] {
   const sorted = [...candidates].sort((a, b) => {
-    // 若 kling30 与 kling 在同位置竞争且得分相近，优先选包含 3.0 后缀的 kling30
-    if (a.templateId === 'kling30' && b.templateId === 'kling' && b.score - a.score < 0.08) {
-      return -1;
-    }
-    if (b.templateId === 'kling30' && a.templateId === 'kling' && a.score - b.score < 0.08) {
-      return 1;
-    }
-    return b.score - a.score;
+    if (b.score !== a.score) return b.score - a.score;
+    if (a.templateId !== b.templateId) return a.templateId.localeCompare(b.templateId);
+    if (a.y !== b.y) return a.y - b.y;
+    return a.x - b.x;
   });
+
+  const isSameWatermarkSpot = (a: MatchedWatermark, b: MatchedWatermark): boolean => {
+    if (boxesOverlapRatio(a, b) > 0.35) return true;
+    return (
+      a.corner === b.corner &&
+      a.brand === b.brand &&
+      Math.abs(a.x - b.x) < Math.min(a.width, b.width) * 0.35 &&
+      Math.abs(a.y - b.y) < Math.min(a.height, b.height) * 0.5
+    );
+  };
 
   const kept: MatchedWatermark[] = [];
   for (const cand of sorted) {
-    const conflict = kept.some((existing) => {
-      if (boxesOverlapRatio(existing, cand) > 0.35) return true;
-      // 同一角落且同模板的近邻候选合并
-      return (
-        existing.corner === cand.corner &&
-        existing.brand === cand.brand &&
-        Math.abs(existing.x - cand.x) < cand.width * 0.35 &&
-        Math.abs(existing.y - cand.y) < cand.height * 0.5
-      );
-    });
-    if (!conflict) {
+    const conflictIdx = kept.findIndex((existing) => isSameWatermarkSpot(existing, cand));
+    if (conflictIdx < 0) {
       kept.push(cand);
+      continue;
+    }
+    // 同位置竞争且得分接近（差值 < 0.08）时，优先用包含 3.0 后缀的 kling30 替代基础 kling
+    const existing = kept[conflictIdx];
+    if (
+      existing.templateId === 'kling' &&
+      cand.templateId === 'kling30' &&
+      existing.score - cand.score < 0.08
+    ) {
+      kept[conflictIdx] = cand;
     }
   }
   return kept;
@@ -380,8 +395,9 @@ export function detectTemplateWatermarks(
     }
   };
 
-  // 快路径：无限定搜索框时，优先校验各模板按短边/长边两种比例在四角标准导出边距的瞬时命中
+  // 快路径：无限定搜索框时，优先校验各模板按短边/长边两种比例在四角标准导出边距的瞬时命中（同时覆盖亮/暗极性）
   const longSide = Math.max(imgW, imgH);
+  const fastCoveredCorners = new Set<ScannedCorner>();
   if (!searchRect) {
     for (const template of TEMPLATE_LIST) {
       const fastScales = [
@@ -407,47 +423,56 @@ export function detectTemplateWatermarks(
             const y = bottom ? imgH - height - gapY : gapY;
             if (x < 0 || y < 0 || x + width > imgW || y + height > imgH) continue;
 
-            // 在标准点周边 +-4px 微调以补偿竖图/横图边距与四舍五入缩放差异
-            let bestVal = -1;
-            let bestX = x;
-            let bestY = y;
-            for (let dy = -4; dy <= 4; dy++) {
-              const py = y + dy;
-              if (py < 0 || py + height > imgH) continue;
-              for (let dx = -4; dx <= 4; dx++) {
-                const px = x + dx;
-                if (px < 0 || px + width > imgW) continue;
-                const vBright = evaluateFullScore(gray, py * imgW + px, samples, 1);
-                if (vBright > bestVal) {
-                  bestVal = vBright;
-                  bestX = px;
-                  bestY = py;
+            for (const polarity of [1, -1] as const) {
+              if (polarity === -1 && template.hasDarkOutline) continue;
+              const minScore = polarity === 1 ? sens.brightThreshold : sens.darkThreshold;
+
+              // 在标准点周边 +-4px 微调以补偿竖图/横图边距与四舍五入缩放差异
+              let bestVal = -1;
+              let bestX = x;
+              let bestY = y;
+              for (let dy = -4; dy <= 4; dy++) {
+                const py = y + dy;
+                if (py < 0 || py + height > imgH) continue;
+                for (let dx = -4; dx <= 4; dx++) {
+                  const px = x + dx;
+                  if (px < 0 || px + width > imgW) continue;
+                  const score = evaluateFullScore(gray, py * imgW + px, samples, polarity);
+                  if (score > bestVal) {
+                    bestVal = score;
+                    bestX = px;
+                    bestY = py;
+                  }
                 }
               }
-            }
 
-            if (bestVal >= sens.brightThreshold) {
-              register({
-                templateId: template.id,
-                brand: template.brand,
-                label: template.label,
-                corner: inferCorner(bestX, bestY, width, height, imgW, imgH),
-                x: bestX,
-                y: bestY,
-                width,
-                height,
-                score: Number(bestVal.toFixed(4)),
-                polarity: 1,
-              });
+              if (bestVal >= minScore) {
+                const corner = inferCorner(bestX, bestY, width, height, imgW, imgH);
+                register({
+                  templateId: template.id,
+                  brand: template.brand,
+                  label: template.label,
+                  corner,
+                  x: bestX,
+                  y: bestY,
+                  width,
+                  height,
+                  score: Number(bestVal.toFixed(4)),
+                  polarity,
+                });
+                if (bestVal >= 0.88) {
+                  fastCoveredCorners.add(corner);
+                }
+              }
             }
           }
         }
       }
     }
 
-    const fastDeduped = deduplicateMatches(candidates);
-    if (fastDeduped.length > 0 && fastDeduped[0].score >= 0.88) {
-      return fastDeduped;
+    // 仅当四角全部已被高分命中时才直接返回；否则保留已命中角落结果，仅对未高分命中的其余角落做多尺度扫描，防止漏检第二角水印
+    if (fastCoveredCorners.size === SCANNED_CORNERS.length) {
+      return deduplicateMatches(candidates);
     }
   }
 
@@ -490,13 +515,39 @@ export function detectTemplateWatermarks(
       } else {
         const gapX = Math.min(imgW - width, Math.ceil(Math.min(shortSide * 0.24, width * 1.45)));
         const gapY = Math.min(imgH - height, Math.ceil(Math.min(shortSide * 0.16, height * 2.5)));
-        // 右下、左下、右上、左上四角搜索区
-        scanZones.push(
-          { x0: imgW - width - gapX, y0: imgH - height - gapY, x1: imgW - width, y1: imgH - height },
-          { x0: 0, y0: imgH - height - gapY, x1: gapX, y1: imgH - height },
-          { x0: imgW - width - gapX, y0: 0, x1: imgW - width, y1: gapY },
-          { x0: 0, y0: 0, x1: gapX, y1: gapY },
-        );
+        // 仅扫描快路径尚未高分命中的角落，兼顾多尺度双角检出率与扫描耗时
+        if (!fastCoveredCorners.has('bottom-right')) {
+          scanZones.push({
+            x0: imgW - width - gapX,
+            y0: imgH - height - gapY,
+            x1: imgW - width,
+            y1: imgH - height,
+          });
+        }
+        if (!fastCoveredCorners.has('bottom-left')) {
+          scanZones.push({
+            x0: 0,
+            y0: imgH - height - gapY,
+            x1: gapX,
+            y1: imgH - height,
+          });
+        }
+        if (!fastCoveredCorners.has('top-right')) {
+          scanZones.push({
+            x0: imgW - width - gapX,
+            y0: 0,
+            x1: imgW - width,
+            y1: gapY,
+          });
+        }
+        if (!fastCoveredCorners.has('top-left')) {
+          scanZones.push({
+            x0: 0,
+            y0: 0,
+            x1: gapX,
+            y1: gapY,
+          });
+        }
       }
 
       for (const zone of scanZones) {
@@ -811,7 +862,12 @@ export function computeTopHatSignals(
   w: number,
   h: number,
   radius: number,
-): { whiteTopHat: Float32Array; blackTopHat: Float32Array; opened: Float32Array; closed: Float32Array } {
+): {
+  whiteTopHat: Float32Array;
+  blackTopHat: Float32Array;
+  opened: Float32Array;
+  closed: Float32Array;
+} {
   const eroded = morphFilter2D(lum, w, h, radius, false);
   const opened = morphFilter2D(eroded, w, h, radius, true);
   const dilated = morphFilter2D(lum, w, h, radius, true);
@@ -1075,7 +1131,9 @@ function detectGenericCornerFallback(
           const gapX = Math.max(0, Math.max(a.minX - b.maxX, b.minX - a.maxX));
           const gapY = Math.max(0, Math.max(a.minY - b.maxY, b.minY - a.maxY));
           const sameLine = gapY === 0 || Math.abs(aCy - bCy) <= maxH * 0.65;
-          const allowedX = sameLine ? Math.max(baseGapX, Math.round(maxH * 1.55)) : Math.round(baseGapX * 0.65);
+          const allowedX = sameLine
+            ? Math.max(baseGapX, Math.round(maxH * 1.55))
+            : Math.round(baseGapX * 0.65);
           const allowedY = Math.max(baseGapY, Math.round(maxH * 0.65));
           if (gapX > allowedX || gapY > allowedY) continue;
           if (maxH / Math.max(1, Math.min(ah, bh)) > 5.5 && gapX > 6) continue;
@@ -1187,9 +1245,12 @@ function detectGenericCornerFallback(
         if (locRatio < 1.8 && gradRatio < 1.65) continue;
 
         const touchesInnerLeft = (corner === 'bottom-right' || corner === 'top-right') && minX <= 2;
-        const touchesInnerRight = (corner === 'bottom-left' || corner === 'top-left') && maxX >= roi.w - 3;
-        const touchesInnerTop = (corner === 'bottom-right' || corner === 'bottom-left') && minY <= 2;
-        const touchesInnerBottom = (corner === 'top-right' || corner === 'top-left') && maxY >= roi.h - 3;
+        const touchesInnerRight =
+          (corner === 'bottom-left' || corner === 'top-left') && maxX >= roi.w - 3;
+        const touchesInnerTop =
+          (corner === 'bottom-right' || corner === 'bottom-left') && minY <= 2;
+        const touchesInnerBottom =
+          (corner === 'top-right' || corner === 'top-left') && maxY >= roi.h - 3;
         const innerHits =
           (touchesInnerLeft ? 1 : 0) +
           (touchesInnerRight ? 1 : 0) +
@@ -1197,8 +1258,10 @@ function detectGenericCornerFallback(
           (touchesInnerBottom ? 1 : 0);
         if (innerHits >= 2) continue;
 
-        const distOuterX = corner === 'bottom-right' || corner === 'top-right' ? roi.w - 1 - maxX : minX;
-        const distOuterY = corner === 'bottom-right' || corner === 'bottom-left' ? roi.h - 1 - maxY : minY;
+        const distOuterX =
+          corner === 'bottom-right' || corner === 'top-right' ? roi.w - 1 - maxX : minX;
+        const distOuterY =
+          corner === 'bottom-right' || corner === 'bottom-left' ? roi.h - 1 - maxY : minY;
         const normDistX = distOuterX / roi.w;
         const normDistY = distOuterY / roi.h;
         if (normDistX > 0.52 || normDistY > 0.55) continue;

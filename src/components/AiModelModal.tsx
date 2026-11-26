@@ -14,20 +14,37 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { useAppStore } from '../store/useAppStore';
+import {
+  useAppActions,
+  useAppSelector,
+  useEngineModelState,
+  type AppState,
+} from '../store/useAppStore';
 
+const selectIsProcessing = (s: AppState) => s.isProcessing;
+
+/** 按十进制 SI 单位格式化模型体积，与 README 及下载源标称（28.1 MB / 208 MB）保持一致 */
 function formatBytes(bytes?: number): string {
   if (!bytes || bytes <= 0) return '0 B';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1000) return `${bytes} B`;
+  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(1)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
 }
 
 /** 浏览器端 LaMa ONNX AI 模型管理弹窗 */
 export function AiModelModal() {
+  const { engine, miganStatus, lamaStatus, webGpuSupported, aiModelModalOpen, lamaSources } =
+    useEngineModelState();
+  const isProcessing = useAppSelector(selectIsProcessing);
+  const state = {
+    engine,
+    miganStatus,
+    lamaStatus,
+    webGpuSupported,
+    aiModelModalOpen,
+    isProcessing,
+  };
   const {
-    state,
-    lamaSources,
     setAiModelModalOpen,
     setEngine,
     preloadMiganAiModel,
@@ -38,7 +55,7 @@ export function AiModelModal() {
     clearAiModelCache,
     loadAiModelSession,
     unloadAiModelSession,
-  } = useAppStore();
+  } = useAppActions();
 
   const [selectedSourceId, setSelectedSourceId] = useState<string>(
     () => lamaSources[0]?.id ?? 'custom',
@@ -47,12 +64,14 @@ export function AiModelModal() {
   const [draggingFile, setDraggingFile] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const open = state.aiModelModalOpen;
-  const miganStatus = state.miganStatus;
-  const status = state.lamaStatus;
+  const open = aiModelModalOpen;
+  const status = lamaStatus;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setDraggingFile(false);
+      return;
+    }
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setAiModelModalOpen(false);
@@ -127,7 +146,8 @@ export function AiModelModal() {
                 本地 AI 模型管理 · 内置 MI-GAN 与高阶 LaMa
               </h2>
               <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
-                默认内置 28.1 MB MI-GAN 离线即用，也支持可选下载或导入 208 MB LaMa 模型，推理 100% 在本地完成
+                默认内置 28.1 MB MI-GAN 离线即用，也支持可选下载或导入 208 MB LaMa 模型，推理 100%
+                在本地完成
               </p>
             </div>
           </div>
@@ -187,8 +207,8 @@ export function AiModelModal() {
                   </span>
                 </div>
                 <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--text-secondary)]">
-                  独立 Web Worker 推理不卡界面；自动先用轻量引擎平滑预填选区再分簇截取
-                  512×512 局部高清重构，适合手动框选大面积水印与复杂人物/建筑纹理。
+                  独立 Web Worker 推理不卡界面；自动先用轻量引擎平滑预填选区再分簇截取 512×512
+                  局部高清重构，适合手动框选大面积水印与复杂人物/建筑纹理。
                 </p>
                 {miganStatus.state === 'error' && miganStatus.error && (
                   <p className="mt-1 text-[11px] text-[var(--danger)]">{miganStatus.error}</p>
@@ -203,7 +223,8 @@ export function AiModelModal() {
                       setEngine('migan');
                       setAiModelModalOpen(false);
                     }}
-                    className="cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium text-white"
+                    disabled={state.isProcessing}
+                    className="cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
                     style={{ backgroundColor: 'var(--accent)' }}
                   >
                     使用 MI-GAN 精修
@@ -213,7 +234,8 @@ export function AiModelModal() {
                   <button
                     type="button"
                     onClick={() => void unloadMiganAiSession()}
-                    className="inline-flex cursor-pointer items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]"
+                    disabled={state.isProcessing}
+                    className="inline-flex cursor-pointer items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-surface)] disabled:cursor-not-allowed disabled:opacity-45"
                     style={{ borderColor: 'var(--border-default)' }}
                   >
                     <PowerOff className="h-3 w-3" />
@@ -223,8 +245,8 @@ export function AiModelModal() {
                   <button
                     type="button"
                     onClick={() => void preloadMiganAiModel()}
-                    disabled={miganStatus.state === 'loading'}
-                    className="inline-flex cursor-pointer items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium text-[var(--text-primary)] hover:bg-[var(--bg-surface)] disabled:opacity-45"
+                    disabled={miganStatus.state === 'loading' || state.isProcessing}
+                    className="inline-flex cursor-pointer items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium text-[var(--text-primary)] hover:bg-[var(--bg-surface)] disabled:cursor-not-allowed disabled:opacity-45"
                     style={{ borderColor: 'var(--border-default)' }}
                   >
                     {miganStatus.state === 'loading' ? (
@@ -352,7 +374,8 @@ export function AiModelModal() {
                       <button
                         type="button"
                         onClick={() => void loadAiModelSession()}
-                        className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-white"
+                        disabled={state.isProcessing}
+                        className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
                         style={{ backgroundColor: 'var(--accent)' }}
                       >
                         <Play className="h-3 w-3" />
@@ -362,7 +385,8 @@ export function AiModelModal() {
                       <button
                         type="button"
                         onClick={() => void unloadAiModelSession()}
-                        className="inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]"
+                        disabled={state.isProcessing}
+                        className="inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-surface)] disabled:cursor-not-allowed disabled:opacity-45"
                         style={{ borderColor: 'var(--border-default)' }}
                       >
                         <PowerOff className="h-3 w-3" />
@@ -373,7 +397,8 @@ export function AiModelModal() {
                     <button
                       type="button"
                       onClick={() => void clearAiModelCache()}
-                      className="inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)]"
+                      disabled={state.isProcessing}
+                      className="inline-flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] disabled:cursor-not-allowed disabled:opacity-45"
                       style={{ borderColor: 'rgba(244, 63, 94, 0.3)' }}
                     >
                       <Trash2 className="h-3 w-3" />
@@ -383,7 +408,8 @@ export function AiModelModal() {
                 </div>
               ) : (
                 <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-                  首次下载约 198~208 MB；如无需 AI 大面积重绘，可直接使用零下载「快速引擎」。
+                  首次下载约 208 MB；如无需 AI 大面积重绘，可直接使用零下载「快速修复」或内置「AI
+                  精修（MI-GAN）」。
                 </p>
               )}
             </div>
@@ -569,6 +595,7 @@ export function AiModelModal() {
                     onClick={handleStartDownload}
                     disabled={
                       isLoadingSession ||
+                      state.isProcessing ||
                       (selectedSourceId === 'custom' && customUrl.trim().length === 0)
                     }
                     className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-medium text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45"
@@ -599,6 +626,7 @@ export function AiModelModal() {
 
             <div
               onDragOver={(e) => {
+                if (state.isProcessing) return;
                 e.preventDefault();
                 e.stopPropagation();
                 setDraggingFile(true);
@@ -611,18 +639,27 @@ export function AiModelModal() {
                 e.preventDefault();
                 e.stopPropagation();
                 setDraggingFile(false);
+                if (state.isProcessing) return;
                 handleLocalFile(e.dataTransfer.files[0]);
               }}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                if (!state.isProcessing) {
+                  fileInputRef.current?.click();
+                }
+              }}
               role="button"
-              tabIndex={0}
+              tabIndex={state.isProcessing ? -1 : 0}
+              aria-disabled={state.isProcessing}
               onKeyDown={(e) => {
+                if (state.isProcessing) return;
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   fileInputRef.current?.click();
                 }
               }}
-              className="flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-4 py-5 text-center transition-colors"
+              className={`flex flex-col items-center justify-center rounded-xl border border-dashed px-4 py-5 text-center transition-colors ${
+                state.isProcessing ? 'cursor-not-allowed opacity-45' : 'cursor-pointer'
+              }`}
               style={{
                 backgroundColor: draggingFile ? 'var(--accent-soft)' : 'var(--bg-panel)',
                 borderColor: draggingFile ? 'var(--accent)' : 'var(--border-default)',
@@ -656,7 +693,8 @@ export function AiModelModal() {
             }}
           >
             <strong className="text-[var(--text-primary)]">引擎选择建议：</strong>
-            即梦 AI、可灵 AI、豆包等角落水印，自动识别后使用「快速修复」即可在毫秒内按真实笔画无痕去除；当手动框选大面积不透明水印或复杂背景时，直接切换顶栏「AI
+            即梦 AI、可灵
+            AI、豆包等角落水印，自动识别后使用「快速修复」即可在毫秒内按真实笔画无痕去除；当手动框选大面积不透明水印或复杂背景时，直接切换顶栏「AI
             精修（MI-GAN）」即可离线高保真重构；如需超大规模结构补全，可按需配置下方 LaMa 模型。
           </div>
         </div>
@@ -668,8 +706,8 @@ export function AiModelModal() {
         >
           <span className="text-[11px] text-[var(--text-muted)]">
             {isCachedOrReady
-              ? '已就绪，可随时使用 AI 增强引擎修复'
-              : '可随时关闭窗口，继续使用快速引擎'}
+              ? '已就绪，可随时使用高阶 AI（LaMa）修复'
+              : '可随时关闭窗口，继续使用快速修复或内置 AI 精修'}
           </span>
           <div className="flex items-center gap-2">
             {isCachedOrReady && state.engine !== 'lama' && (
@@ -679,10 +717,11 @@ export function AiModelModal() {
                   setEngine('lama');
                   setAiModelModalOpen(false);
                 }}
-                className="cursor-pointer rounded-lg px-3.5 py-1.5 text-xs font-medium text-white"
+                disabled={state.isProcessing}
+                className="cursor-pointer rounded-lg px-3.5 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
                 style={{ backgroundColor: 'var(--accent)' }}
               >
-                切换至 AI 增强引擎
+                切换至高阶 AI（LaMa）
               </button>
             )}
             <button

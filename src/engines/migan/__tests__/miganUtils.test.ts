@@ -3,7 +3,8 @@
  * 覆盖：双角选区分簇裁剪、512×512 反转掩码保守投影、羽化回贴与非遮罩区逐字节无损校验。
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { disposeMiganSession, preloadMiganModel } from '../index';
 import {
   MIGAN_INPUT_SIZE,
   computeClusterCropWindows,
@@ -54,7 +55,13 @@ describe('MI-GAN 分簇局部裁剪、反转掩码打包与无损回贴', () => 
       mask[32 * w + x] = 255;
     }
 
-    const { rgba512, mask512 } = prepareMiganInput(rgba, mask, w, { x: 0, y: 0, width: w, height: h }, 32);
+    const { rgba512, mask512 } = prepareMiganInput(
+      rgba,
+      mask,
+      w,
+      { x: 0, y: 0, width: w, height: h },
+      32,
+    );
     expect(rgba512.length).toBe(32 * 32 * 4);
     expect(mask512.length).toBe(32 * 32);
 
@@ -132,5 +139,108 @@ describe('MI-GAN 分簇局部裁剪、反转掩码打包与无损回贴', () => 
     expect(output[center + 1]).toBe(210);
     expect(output[center + 2]).toBe(180);
     expect(output[center + 3]).toBe(200);
+  });
+
+  it('传入 clusterRect 与 writtenMask 时仅回贴当前簇，避免多簇重叠裁剪窗互相覆写', () => {
+    const w = 80;
+    const h = 40;
+    const original = new Uint8ClampedArray(w * h * 4).fill(50);
+    const prefilled = new Uint8ClampedArray(w * h * 4).fill(80);
+    const mask = new Uint8Array(w * h);
+    fillRect(mask, w, 10, 10, 10, 10); // 簇 1
+    fillRect(mask, w, 50, 10, 10, 10); // 簇 2
+
+    const output = new Uint8ClampedArray(original);
+    const writtenMask = new Uint8Array(w * h);
+    const modelOut1 = new Uint8ClampedArray(32 * 32 * 4).fill(210);
+    const modelOut2 = new Uint8ClampedArray(32 * 32 * 4).fill(140);
+
+    // 即使裁剪窗口覆盖两个簇，簇 1 回贴也只应写入 clusterRect1 内的像素
+    stitchMiganResultIntoOutput(
+      output,
+      original,
+      prefilled,
+      mask,
+      w,
+      { x: 0, y: 0, width: w, height: h },
+      modelOut1,
+      32,
+      0,
+      { clusterRect: { x: 10, y: 10, width: 10, height: 10 }, writtenMask },
+    );
+
+    expect(output[(15 * w + 15) * 4]).toBe(210);
+    // 簇 2 仍保持原值尚未被簇 1 覆写
+    expect(output[(15 * w + 55) * 4]).toBe(50);
+
+    stitchMiganResultIntoOutput(
+      output,
+      original,
+      prefilled,
+      mask,
+      w,
+      { x: 0, y: 0, width: w, height: h },
+      modelOut2,
+      32,
+      0,
+      { clusterRect: { x: 50, y: 10, width: 10, height: 10 }, writtenMask },
+    );
+
+    expect(output[(15 * w + 15) * 4]).toBe(210);
+    expect(output[(15 * w + 55) * 4]).toBe(140);
+  });
+});
+
+describe('MI-GAN 会话生命周期与队列防死锁', () => {
+  afterEach(async () => {
+    await disposeMiganSession();
+    vi.unstubAllGlobals();
+  });
+
+  it('任务挂起期间调用 disposeMiganSession 应立即中止当前任务并保持后续队列可用', async () => {
+    let instanceCount = 0;
+    class FakeWorker {
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      onerror: ((ev: ErrorEvent) => void) | null = null;
+      onmessageerror: (() => void) | null = null;
+      terminated = false;
+      private readonly id: number;
+
+      constructor() {
+        instanceCount += 1;
+        this.id = instanceCount;
+      }
+
+      postMessage(msg: { type: string; taskId: number }) {
+        // 第一个 Worker 模拟永久卡住，第二个 Worker 正常返回 ready
+        if (this.id >= 2 && msg.type === 'preload') {
+          queueMicrotask(() => {
+            if (!this.terminated) {
+              this.onmessage?.({
+                data: { type: 'ready', taskId: msg.taskId, sizeBytes: 28_079_181 },
+              } as MessageEvent);
+            }
+          });
+        }
+      }
+
+      terminate() {
+        this.terminated = true;
+      }
+    }
+
+    vi.stubGlobal('Worker', FakeWorker);
+
+    const firstAttempt = preloadMiganModel();
+    // 等待微任务让 sendWorkerJob 注册到队列
+    await Promise.resolve();
+    await disposeMiganSession();
+
+    await expect(firstAttempt).rejects.toMatchObject({ name: 'AbortError' });
+
+    // 验证 serialQueue 未死锁，后续预加载可正常完成
+    const status = await preloadMiganModel();
+    expect(status.state).toBe('ready');
+    expect(status.backend).toBe('wasm');
   });
 });

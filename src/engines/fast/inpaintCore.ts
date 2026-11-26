@@ -2,14 +2,14 @@
  * 纯前端零依赖轻量去水印核心算法（无马赛克 · 像素级无损保留非遮罩区）
  *
  * 流水线设计：
- * 1. 紧凑连通区域分块：按遮罩膨胀邻域拆分为独立局部 ROI（仅保留 16~48px 周边背景），
+ * 1. 紧凑连通区域分块：按遮罩膨胀邻域拆分为独立局部 ROI（仅保留 18~52px 周边背景），
  *    避免远处无关景物干扰，兼顾 4K 大图与双角水印处理速度，非遮罩区 100% 字节级无损。
  * 2. 阶段一（标准 Telea Fast Marching 填充）：基于二值最小堆求解 2D 程函方程并从边界向内填充，
  *    支持预乘 RGB 与透明通道（PNG/WebP）独立修补，严格限制边界色域杜绝色条过冲。
  * 3. 阶段二（收敛型拉普拉斯调和融合）：在遮罩内求解离散拉普拉斯方程 ∇²I = 0，
  *    固定边界像素使明暗与色彩渐变自然穿过选区，彻底消除 FMM 中轴折痕与块状马赛克。
- * 4. 阶段三（半透明逆向还原与高频微纹理回填）：
- *    - 命中已知半透明平台模板（如即梦、豆包）时，在稳定笔画内部利用物理混合关系 1/(1-α) 取回底层真实细节；
+ * 4. 阶段三（半透明笔画高频细节逆向补偿与邻近微纹理回填）：
+ *    - 命中已知半透明平台模板（如即梦、豆包）时，在稳定笔画内部利用物理混合比例 1/(1-α) 补偿底层真实高频微细节；
  *    - 不透明笔画及手动选区借用邻近同色干净背景的限幅拉普拉斯微纹理，避免平滑涂抹塑料感。
  */
 
@@ -173,32 +173,37 @@ export function findMaskClusters(mask: Uint8Array, width: number, height: number
     }
   }
 
-  // 合并间距小于紧凑边距的重叠簇
+  // 迭代合并所有间距小于紧凑边距的簇，保证传递邻近的多个小簇被完整归并
   const mergeGap = clamp(Math.ceil(32 * Math.max(1, Math.min(width, height) / 1080)), 28, 72);
-  const merged: Box[] = [];
-  for (const box of clusters) {
-    if (box.holePixels === 0) continue;
-    let absorbed = false;
-    for (const existing of merged) {
-      const gapX = Math.max(0, Math.max(box.minX - existing.maxX, existing.minX - box.maxX));
-      const gapY = Math.max(0, Math.max(box.minY - existing.maxY, existing.minY - box.maxY));
-      if (gapX <= mergeGap && gapY <= mergeGap) {
-        existing.minX = Math.min(existing.minX, box.minX);
-        existing.minY = Math.min(existing.minY, box.minY);
-        existing.maxX = Math.max(existing.maxX, box.maxX);
-        existing.maxY = Math.max(existing.maxY, box.maxY);
-        existing.holePixels += box.holePixels;
-        absorbed = true;
-        break;
+  const merged: Box[] = clusters.filter((box) => box.holePixels > 0).map((box) => ({ ...box }));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < merged.length; i++) {
+      const a = merged[i];
+      for (let j = i + 1; j < merged.length; j++) {
+        const b = merged[j];
+        const gapX = Math.max(0, Math.max(b.minX - a.maxX, a.minX - b.maxX));
+        const gapY = Math.max(0, Math.max(b.minY - a.maxY, a.minY - b.maxY));
+        if (gapX <= mergeGap && gapY <= mergeGap) {
+          a.minX = Math.min(a.minX, b.minX);
+          a.minY = Math.min(a.minY, b.minY);
+          a.maxX = Math.max(a.maxX, b.maxX);
+          a.maxY = Math.max(a.maxY, b.maxY);
+          a.holePixels += b.holePixels;
+          merged.splice(j, 1);
+          changed = true;
+          break;
+        }
       }
+      if (changed) break;
     }
-    if (!absorbed) merged.push(box);
   }
 
   return merged;
 }
 
-/** 计算紧凑局部修复窗口（仅需留足 16~48px 周边背景供 Telea、拉普拉斯与邻域纹理借用） */
+/** 计算紧凑局部修复窗口（仅需留足 18~52px 周边背景供 Telea、拉普拉斯与邻域纹理借用） */
 function computeCompactRoi(
   box: Box,
   imgW: number,
@@ -362,6 +367,7 @@ function runTeleaFmm(
   h: number,
   holeIndices: Uint32Array,
   radius = 3,
+  shouldAbort?: () => boolean,
 ): void {
   const total = w * h;
   if (holeIndices.length === 0 || holeIndices.length === total) return;
@@ -408,7 +414,11 @@ function runTeleaFmm(
   const minC = new Float32Array(channels);
   const maxC = new Float32Array(channels);
 
+  let processedSteps = 0;
   while (heap.size > 0) {
+    if ((++processedSteps & 4095) === 0) {
+      checkAbort(shouldAbort);
+    }
     const idx = heap.pop();
     if (state[idx] === FMM_KNOWN) continue;
     const x = idx % w;
@@ -477,8 +487,10 @@ function runTeleaFmm(
 
           let gx = 0;
           let gy = 0;
-          if (hasGradX) gx = 0.5 * (values[(nIdx + 1) * channels + c] - values[(nIdx - 1) * channels + c]);
-          if (hasGradY) gy = 0.5 * (values[(nIdx + w) * channels + c] - values[(nIdx - w) * channels + c]);
+          if (hasGradX)
+            gx = 0.5 * (values[(nIdx + 1) * channels + c] - values[(nIdx - 1) * channels + c]);
+          if (hasGradY)
+            gy = 0.5 * (values[(nIdx + w) * channels + c] - values[(nIdx - w) * channels + c]);
 
           // 保守阻尼的一阶外推，在保证斜线与平滑渐变延续的同时杜绝高频振铃
           sumC[c] += wt * (nv + 0.45 * (gx * rx + gy * ry));
@@ -523,6 +535,7 @@ function blendBoundaryLaplace(
   h: number,
   channels: 1 | 3,
   isHigh: boolean,
+  shouldAbort?: () => boolean,
 ): void {
   const count = holeIndices.length;
   if (count === 0) return;
@@ -534,6 +547,7 @@ function blendBoundaryLaplace(
   const omega = count > 2400 ? 1.32 : 1.0;
 
   for (let pass = 0; pass < iterations; pass++) {
+    checkAbort(shouldAbort);
     let maxChange = 0;
     for (let k = 0; k < count; k++) {
       const p = holeIndices[k];
@@ -546,7 +560,8 @@ function blendBoundaryLaplace(
       const base = p * channels;
 
       for (let c = 0; c < channels; c++) {
-        const avg = (values[left + c] + values[right + c] + values[up + c] + values[down + c]) * 0.25;
+        const avg =
+          (values[left + c] + values[right + c] + values[up + c] + values[down + c]) * 0.25;
         const prev = values[base + c];
         const next = omega === 1.0 ? avg : clamp(prev + omega * (avg - prev), 0, 255);
         const diff = Math.abs(next - prev);
@@ -623,10 +638,7 @@ function laplacianDetailAt(rgb: Float32Array, p: number, w: number, c: number): 
   return (
     rgb[p * 3 + c] -
     0.25 *
-      (rgb[(p - 1) * 3 + c] +
-        rgb[(p + 1) * 3 + c] +
-        rgb[(p - w) * 3 + c] +
-        rgb[(p + w) * 3 + c])
+      (rgb[(p - 1) * 3 + c] + rgb[(p + 1) * 3 + c] + rgb[(p - w) * 3 + c] + rgb[(p + w) * 3 + c])
   );
 }
 
@@ -637,12 +649,10 @@ function buildRoiTemplateAlpha(
   roiY: number,
   roiW: number,
   roiH: number,
-): { alpha: Uint8Array; foreground: number; polarity: 1 | -1 } | null {
+): Uint8Array | null {
   if (!marks || marks.length === 0) return null;
 
   let alpha: Uint8Array | null = null;
-  let foreground = 255;
-  let polarity: 1 | -1 = 1;
 
   for (const mark of marks) {
     const tpl = WATERMARK_TEMPLATES[mark.templateId];
@@ -655,8 +665,6 @@ function buildRoiTemplateAlpha(
     if (left >= right || top >= bottom) continue;
 
     alpha ??= new Uint8Array(roiW * roiH);
-    foreground = mark.polarity === 1 ? tpl.foreground : 24;
-    polarity = mark.polarity;
 
     for (let y = top; y < bottom; y++) {
       const dstRow = (y - roiY) * roiW;
@@ -668,11 +676,11 @@ function buildRoiTemplateAlpha(
     }
   }
 
-  return alpha ? { alpha, foreground, polarity } : null;
+  return alpha;
 }
 
 /**
- * 温和保边内缘融合：仅在紧邻干净背景的 1~2px 内缘平滑锯齿，不污染非遮罩区
+ * 温和保边内缘融合：仅在紧邻干净背景的 1px 内缘平滑锯齿，不污染非遮罩区
  */
 function applyGentleBoundaryAntiAlias(
   outRgb: Float32Array,
@@ -842,24 +850,23 @@ async function inpaintSingleRoi(
 
   // 阶段一：Telea FMM 填充
   onProgress?.('正在修补水印笔画骨架...', Math.round(progressStart + progressSpan * 0.2));
-  runTeleaFmm(baseRgb, 3, roiMask, roiW, roiH, holeIndices, 3);
+  runTeleaFmm(baseRgb, 3, roiMask, roiW, roiH, holeIndices, 3, shouldAbort);
   if (hasTransparency) {
-    runTeleaFmm(alphaBuf, 1, roiMask, roiW, roiH, holeIndices, 3);
+    runTeleaFmm(alphaBuf, 1, roiMask, roiW, roiH, holeIndices, 3, shouldAbort);
   }
   await maybeYield();
 
   // 阶段二：收敛型拉普拉斯调和融合（消除拼接轮廓与马赛克）
   onProgress?.('正在拉普拉斯调和融合背景...', Math.round(progressStart + progressSpan * 0.58));
-  blendBoundaryLaplace(baseRgb, holeIndices, roiW, roiH, 3, isHigh);
+  blendBoundaryLaplace(baseRgb, holeIndices, roiW, roiH, 3, isHigh, shouldAbort);
   if (hasTransparency) {
-    blendBoundaryLaplace(alphaBuf, holeIndices, roiW, roiH, 1, isHigh);
+    blendBoundaryLaplace(alphaBuf, holeIndices, roiW, roiH, 1, isHigh, shouldAbort);
   }
   await maybeYield();
 
-  // 阶段三：半透明逆向还原 + 邻近高频微纹理回填
+  // 阶段三：半透明高频细节逆向补偿 + 邻近高频微纹理回填
   onProgress?.('正在还原背景细腻纹理...', Math.round(progressStart + progressSpan * 0.82));
-  const templateAlphaInfo = buildRoiTemplateAlpha(matchedMarks, roiX, roiY, roiW, roiH);
-  const tplAlpha = templateAlphaInfo?.alpha;
+  const tplAlpha = buildRoiTemplateAlpha(matchedMarks, roiX, roiY, roiW, roiH);
   const textureOffsets = isHigh ? TEXTURE_OFFSETS_HIGH : TEXTURE_OFFSETS_STD;
   const finalRgb = new Float32Array(roiTotal * 3);
 
@@ -887,7 +894,7 @@ async function inpaintSingleRoi(
     const stableAlpha =
       isInterior &&
       outA === 255 &&
-      tplAlpha !== undefined &&
+      tplAlpha !== null &&
       aNorm >= 0.2 &&
       aNorm <= 0.85 &&
       Math.abs(tplAlpha[p - 1] - tplAlpha[p]) < 9 &&
@@ -919,7 +926,15 @@ async function inpaintSingleRoi(
 
   // 轻微保边抗锯齿（仅在不透明区域应用，避免干扰半透明边界）
   if (!hasTransparency && featherPx > 0) {
-    applyGentleBoundaryAntiAlias(finalRgb, roiOrigRgba, roiMask, roiW, roiH, holeIndices, featherPx);
+    applyGentleBoundaryAntiAlias(
+      finalRgb,
+      roiOrigRgba,
+      roiMask,
+      roiW,
+      roiH,
+      holeIndices,
+      featherPx,
+    );
   }
   await maybeYield();
 

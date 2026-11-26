@@ -124,8 +124,30 @@ describe('平台水印预设与自适应区域计算 (presets)', () => {
     expect(afterDelete).toHaveLength(0);
     expect(loadCustomPresets()).toHaveLength(0);
 
-    // 损坏 JSON 时安全返回空列表而不抛出异常
+    // 损坏 JSON 或非法 region 字段时安全过滤，不产出 NaN
     localStorage.setItem('clearmark_custom_presets_v1', '{invalid-json');
     expect(loadCustomPresets()).toEqual([]);
+
+    localStorage.setItem(
+      'clearmark_custom_presets_v1',
+      JSON.stringify([
+        {
+          id: 'bad-anchor',
+          name: '非法锚点',
+          platform: 'custom',
+          regions: [{ anchor: 'invalid-corner', widthRatio: 0.2, heightRatio: 0.1 }],
+        },
+        {
+          id: 'bad-ratio',
+          name: '非法比例',
+          platform: 'custom',
+          regions: [{ anchor: 'bottom-right', widthRatio: -1, heightRatio: 0.1 }],
+        },
+        custom,
+      ]),
+    );
+    const loaded = loadCustomPresets();
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].id).toBe(custom.id);
   });
 });

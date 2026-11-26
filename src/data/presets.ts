@@ -475,6 +475,47 @@ export function createCustomPresetFromRect(
   };
 }
 
+const VALID_ANCHORS = new Set<CornerAnchor>([
+  'bottom-right',
+  'bottom-left',
+  'top-right',
+  'top-left',
+  'bottom-center',
+]);
+
+function isFinitePositive(val: unknown): val is number {
+  return typeof val === 'number' && Number.isFinite(val) && val > 0;
+}
+
+function isValidRegionRule(rule: unknown): rule is PresetRegionRule {
+  if (!rule || typeof rule !== 'object') {
+    return false;
+  }
+  const r = rule as Partial<PresetRegionRule>;
+  if (!r.anchor || !VALID_ANCHORS.has(r.anchor)) {
+    return false;
+  }
+  if (!isFinitePositive(r.widthRatio) || !isFinitePositive(r.heightRatio)) {
+    return false;
+  }
+  if (r.fixedNormalizedRect !== undefined) {
+    const f = r.fixedNormalizedRect;
+    if (
+      !f ||
+      typeof f !== 'object' ||
+      typeof f.x !== 'number' ||
+      !Number.isFinite(f.x) ||
+      typeof f.y !== 'number' ||
+      !Number.isFinite(f.y) ||
+      !isFinitePositive(f.width) ||
+      !isFinitePositive(f.height)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isValidPreset(item: unknown): item is WatermarkPreset {
   if (!item || typeof item !== 'object') {
     return false;
@@ -482,10 +523,13 @@ function isValidPreset(item: unknown): item is WatermarkPreset {
   const candidate = item as Partial<WatermarkPreset>;
   return (
     typeof candidate.id === 'string' &&
+    candidate.id.trim().length > 0 &&
     typeof candidate.name === 'string' &&
+    candidate.name.trim().length > 0 &&
     typeof candidate.platform === 'string' &&
     Array.isArray(candidate.regions) &&
-    candidate.regions.length > 0
+    candidate.regions.length > 0 &&
+    candidate.regions.every(isValidRegionRule)
   );
 }
 

@@ -15,8 +15,21 @@ import {
   Undo2,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { useAppStore } from '../store/useAppStore';
+import {
+  shallowEqual,
+  useActiveImageMeta,
+  useAppActions,
+  useAppSelector,
+  useTaskBusyState,
+  type AppState,
+} from '../store/useAppStore';
 import type { ToolType } from '../types';
+
+const selectToolbarToolState = (s: AppState) => ({
+  tool: s.tool,
+  showMask: s.showMask,
+  maskOpacity: s.maskOpacity,
+});
 
 interface ToolbarProps {
   onOpenShortcuts: () => void;
@@ -37,12 +50,10 @@ const TOOL_ITEMS: ReadonlyArray<{
 
 /** 左侧竖排专业修图工具栏 */
 export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
+  const { activeImage, canUndo, canRedo, hasActiveMask } = useActiveImageMeta();
+  const { tool, showMask, maskOpacity } = useAppSelector(selectToolbarToolState, shallowEqual);
+  const { isBusy } = useTaskBusyState();
   const {
-    state,
-    activeImage,
-    canUndo,
-    canRedo,
-    hasActiveMask,
     setTool,
     undoActive,
     redoActive,
@@ -51,7 +62,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
     dilateActiveMask,
     setShowMask,
     setMaskOpacity,
-  } = useAppStore();
+  } = useAppActions();
 
   const [opacityPopoverOpen, setOpacityPopoverOpen] = useState(false);
   const opacityRef = useRef<HTMLDivElement | null>(null);
@@ -82,7 +93,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
         <div className="flex flex-col items-center gap-1">
           {TOOL_ITEMS.map((item) => {
             const Icon = item.icon;
-            const isActive = state.tool === item.id;
+            const isActive = tool === item.id;
             return (
               <button
                 key={item.id}
@@ -125,7 +136,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
           <button
             type="button"
             onClick={undoActive}
-            disabled={!canUndo || state.isProcessing}
+            disabled={!canUndo || isBusy}
             title="撤销上一步修补 (⌘Z / Ctrl+Z)"
             aria-label="撤销"
             className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-35"
@@ -136,7 +147,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
           <button
             type="button"
             onClick={redoActive}
-            disabled={!canRedo || state.isProcessing}
+            disabled={!canRedo || isBusy}
             title="重做修补 (⇧⌘Z / Ctrl+Shift+Z)"
             aria-label="重做"
             className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-35"
@@ -147,7 +158,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
           <button
             type="button"
             onClick={resetActiveToOriginal}
-            disabled={!activeImage?.processed || state.isProcessing}
+            disabled={!activeImage?.processed || isBusy}
             title="恢复当前图片为原始未处理状态"
             aria-label="恢复原图"
             className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-35"
@@ -163,7 +174,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
           <button
             type="button"
             onClick={() => dilateActiveMask(4)}
-            disabled={!activeImage?.maskBytes || state.isProcessing}
+            disabled={!hasActiveMask || isBusy}
             title="选区向外扩展 4px（覆盖水印柔光阴影边缘）"
             aria-label="选区外扩 4px"
             className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-35"
@@ -174,7 +185,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
           <button
             type="button"
             onClick={clearActiveMask}
-            disabled={!hasActiveMask || state.isProcessing}
+            disabled={!hasActiveMask || isBusy}
             title="清空当前图片遮罩与预设框"
             aria-label="清空选区"
             className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--danger-soft)] hover:text-[var(--danger)] disabled:cursor-not-allowed disabled:opacity-35"
@@ -188,15 +199,15 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
       <div className="flex flex-col items-center gap-1">
         <button
           type="button"
-          onClick={() => setShowMask(!state.showMask)}
-          title={state.showMask ? '隐藏红色遮罩层' : '显示红色遮罩层'}
-          aria-label={state.showMask ? '隐藏遮罩' : '显示遮罩'}
+          onClick={() => setShowMask(!showMask)}
+          title={showMask ? '隐藏红色遮罩层' : '显示红色遮罩层'}
+          aria-label={showMask ? '隐藏遮罩' : '显示遮罩'}
           className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg transition-colors hover:bg-[var(--bg-surface)]"
           style={{
-            color: state.showMask ? 'var(--mask-stroke)' : 'var(--text-muted)',
+            color: showMask ? 'var(--mask-stroke)' : 'var(--text-muted)',
           }}
         >
-          {state.showMask ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+          {showMask ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
         </button>
 
         {/* 遮罩透明度弹出浮层 */}
@@ -204,7 +215,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
           <button
             type="button"
             onClick={() => setOpacityPopoverOpen((prev) => !prev)}
-            title={`遮罩透明度 (${Math.round(state.maskOpacity * 100)}%)`}
+            title={`遮罩透明度 (${Math.round(maskOpacity * 100)}%)`}
             aria-label="调整遮罩透明度"
             className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)]"
             style={
@@ -228,7 +239,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
               <div className="mb-2 flex items-center justify-between text-xs">
                 <span className="font-medium text-[var(--text-primary)]">遮罩不透明度</span>
                 <span className="font-mono text-[11px] text-[var(--accent)]">
-                  {Math.round(state.maskOpacity * 100)}%
+                  {Math.round(maskOpacity * 100)}%
                 </span>
               </div>
               <input
@@ -236,7 +247,7 @@ export function Toolbar({ onOpenShortcuts }: ToolbarProps) {
                 min={0.15}
                 max={0.95}
                 step={0.05}
-                value={state.maskOpacity}
+                value={maskOpacity}
                 onChange={(e) => setMaskOpacity(Number(e.target.value))}
                 className="studio-slider w-full"
               />

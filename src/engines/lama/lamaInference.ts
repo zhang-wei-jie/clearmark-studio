@@ -8,7 +8,7 @@
  * 4. 采用 Crop-and-Stitch 局部裁剪拼接 + 遮罩内缘平滑羽化，保证 4K 大图原分辨率输出且非遮罩区像素 100% 无损。
  */
 
-import type * as OrtNamespace from 'onnxruntime-web';
+import type * as OrtNamespace from 'onnxruntime-web/webgpu';
 import type { InpaintInput, InpaintOutput, InpaintProgress, PixelRect } from '../../types';
 import { findMaskClusters, inpaintFastAsync } from '../fast/inpaintCore';
 
@@ -84,10 +84,10 @@ export async function checkWebGpuSupport(): Promise<boolean> {
   }
 }
 
-/** 按需加载 onnxruntime-web 并根据跨源隔离状态安全配置 WASM 环境 */
+/** 按需加载 onnxruntime-web/webgpu（同时内置 WebGPU JSEP 与 WASM 回退后端，体积较全量包减少约 70%） */
 async function loadAndConfigureOrt(): Promise<typeof OrtNamespace> {
   if (!cachedOrtModule) {
-    cachedOrtModule = await import('onnxruntime-web');
+    cachedOrtModule = await import('onnxruntime-web/webgpu');
   }
   const ort = cachedOrtModule;
 
@@ -108,12 +108,14 @@ async function loadAndConfigureOrt(): Promise<typeof OrtNamespace> {
       ort.env.wasm.numThreads = 1;
     }
 
-    // 关闭代理 Worker 模式以避免独立打包场景下的额外 Worker 路径与跨源限制
+    // 在专用 Worker 中运行或主线程降级时均关闭 ORT 内部 proxy Worker（proxy 不兼容 WebGPU EP 且受 CSP 限制）
     ort.env.wasm.proxy = false;
 
-    // 显式通过 Vite 资源 URL 解析打包后的 JSEP WASM 文件，保证 dev 与 build 环境均不出现 404
+    // 显式通过 Vite 资源 URL 解析与 onnxruntime-web/webgpu 内置 Asyncify 胶水配对的 WASM 文件，
+    // 保证 dev/build 零 404、ABI 100% 匹配，且避免同时打包冗余的 jsep.wasm
     try {
-      const wasmUrlModule = await import('onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url');
+      const wasmUrlModule =
+        await import('onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url');
       if (typeof wasmUrlModule.default === 'string' && wasmUrlModule.default.length > 0) {
         const resolvedUrl =
           typeof globalThis !== 'undefined' && 'location' in globalThis && globalThis.location?.href
@@ -268,53 +270,25 @@ export async function createLamaSessionFromBuffer(
 }
 
 /**
- * 计算智能局部裁剪拼接（Crop-and-Stitch）上下文窗口
- *
- * 规则：
- * 1. 先计算遮罩外接矩形 maskBounds；无有效遮罩像素时返回 null；
- * 2. 期望正方形窗口边长 = max(modelInputSize, ceil(max(mw, mh) * 2.2))；
- * 3. 尽量保持 1:1 正方形避免缩放到 512×512 时产生比例畸变，同时保证 100% 完整包住整个遮罩且严格不越出图像边界。
+ * 依据已求得的遮罩像素外接框直接计算局部裁剪窗口，避免重复分配/扫描整图掩码
  */
-export function computeCropWindow(
+export function computeCropWindowFromBounds(
   imageWidth: number,
   imageHeight: number,
-  mask: Uint8Array,
+  maskBounds: PixelRect,
   modelInputSize: number = DEFAULT_LAMA_INPUT_SIZE,
   contextScale: number = DEFAULT_CONTEXT_SCALE,
 ): CropWindowResult | null {
-  if (imageWidth <= 0 || imageHeight <= 0 || mask.length < imageWidth * imageHeight) {
+  if (imageWidth <= 0 || imageHeight <= 0 || maskBounds.width <= 0 || maskBounds.height <= 0) {
     return null;
   }
 
-  let minX = imageWidth;
-  let minY = imageHeight;
-  let maxX = -1;
-  let maxY = -1;
-
-  for (let y = 0; y < imageHeight; y += 1) {
-    const rowOffset = y * imageWidth;
-    for (let x = 0; x < imageWidth; x += 1) {
-      if (mask[rowOffset + x] > 0) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-
-  if (maxX < minX || maxY < minY) {
-    return null;
-  }
-
-  const maskWidth = maxX - minX + 1;
-  const maskHeight = maxY - minY + 1;
-  const maskBounds: PixelRect = {
-    x: minX,
-    y: minY,
-    width: maskWidth,
-    height: maskHeight,
-  };
+  const minX = maskBounds.x;
+  const minY = maskBounds.y;
+  const maskWidth = maskBounds.width;
+  const maskHeight = maskBounds.height;
+  const maxX = minX + maskWidth - 1;
+  const maxY = minY + maskHeight - 1;
 
   const maxMaskSide = Math.max(maskWidth, maskHeight);
   // 扣除微小浮点误差，避免如 400 * 2.2 = 880.0000000000001 被 ceil 误进位为 881
@@ -364,6 +338,62 @@ export function computeCropWindow(
     cropRect: { x: cropX, y: cropY, width: cropW, height: cropH },
     maskBounds,
   };
+}
+
+/**
+ * 计算智能局部裁剪拼接（Crop-and-Stitch）上下文窗口
+ *
+ * 规则：
+ * 1. 先计算遮罩外接矩形 maskBounds；无有效遮罩像素时返回 null；
+ * 2. 期望正方形窗口边长 = max(modelInputSize, ceil(max(mw, mh) * 2.2))；
+ * 3. 尽量保持 1:1 正方形避免缩放到 512×512 时产生比例畸变，同时保证 100% 完整包住整个遮罩且严格不越出图像边界。
+ */
+export function computeCropWindow(
+  imageWidth: number,
+  imageHeight: number,
+  mask: Uint8Array,
+  modelInputSize: number = DEFAULT_LAMA_INPUT_SIZE,
+  contextScale: number = DEFAULT_CONTEXT_SCALE,
+): CropWindowResult | null {
+  if (imageWidth <= 0 || imageHeight <= 0 || mask.length < imageWidth * imageHeight) {
+    return null;
+  }
+
+  let minX = imageWidth;
+  let minY = imageHeight;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < imageHeight; y += 1) {
+    const rowOffset = y * imageWidth;
+    for (let x = 0; x < imageWidth; x += 1) {
+      if (mask[rowOffset + x] > 0) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < minX || maxY < minY) {
+    return null;
+  }
+
+  const maskBounds: PixelRect = {
+    x: minX,
+    y: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
+
+  return computeCropWindowFromBounds(
+    imageWidth,
+    imageHeight,
+    maskBounds,
+    modelInputSize,
+    contextScale,
+  );
 }
 
 /** 从整图 RGBA 像素中提取指定矩形区域 */
@@ -785,6 +815,16 @@ export function computeInnerFeatherAlpha(
   return alpha;
 }
 
+/** 羽化回贴扩展参数 */
+export interface StitchFeatheredPatchOptions {
+  /** 内缘羽化融合底色及透明通道来源（传入轻量预填图可杜绝将原始水印像素混回修复区） */
+  featherBaseRgba?: Uint8ClampedArray;
+  /** 限定本次仅回贴该簇外接框内的遮罩像素，避免交叠裁剪窗口跨簇覆盖 */
+  clusterRect?: PixelRect;
+  /** 跨簇已回贴标记位，防止重叠区域重复覆写 */
+  writtenMask?: Uint8Array;
+}
+
 /**
  * 将还原至裁剪尺寸的修复块以边缘羽化方式回贴到原图
  * 非遮罩像素（mask === 0）完全跳过写入，保证 100% 原像素无损。
@@ -797,25 +837,40 @@ export function stitchFeatheredPatch(
   patchRgba: Uint8ClampedArray,
   cropRect: PixelRect,
   featherPx: number = DEFAULT_FEATHER_PX,
+  options?: StitchFeatheredPatchOptions,
 ): Uint8ClampedArray<ArrayBuffer> {
   const output = new Uint8ClampedArray(new ArrayBuffer(imgW * imgH * 4));
   output.set(originalRgba);
 
   const maskPatch = extractMaskPatch(mask, imgW, cropRect);
   const alphaMap = computeInnerFeatherAlpha(maskPatch, cropRect.width, cropRect.height, featherPx);
+  const featherBase = options?.featherBaseRgba ?? originalRgba;
+  const usePrefilledAlpha = Boolean(options?.featherBaseRgba);
+  const clusterRect = options?.clusterRect;
+  const writtenMask = options?.writtenMask;
+
+  const cX0 = clusterRect ? clusterRect.x : cropRect.x;
+  const cY0 = clusterRect ? clusterRect.y : cropRect.y;
+  const cX1 = clusterRect ? clusterRect.x + clusterRect.width : cropRect.x + cropRect.width;
+  const cY1 = clusterRect ? clusterRect.y + clusterRect.height : cropRect.y + cropRect.height;
 
   for (let py = 0; py < cropRect.height; py += 1) {
-    const imgRow = (cropRect.y + py) * imgW + cropRect.x;
+    const gy = cropRect.y + py;
+    if (gy < cY0 || gy >= cY1) continue;
+    const imgRow = gy * imgW + cropRect.x;
     const patchRow = py * cropRect.width;
 
     for (let px = 0; px < cropRect.width; px += 1) {
+      const gx = cropRect.x + px;
+      if (gx < cX0 || gx >= cX1) continue;
       const imgIdx = imgRow + px;
-      if (mask[imgIdx] === 0) {
+      const mVal = mask[imgIdx];
+      if (mVal === 0 || writtenMask?.[imgIdx]) {
         continue;
       }
 
       const patchIdx = patchRow + px;
-      const a = alphaMap[patchIdx];
+      const a = alphaMap[patchIdx] * (mVal / 255);
       if (a <= 0) {
         continue;
       }
@@ -823,16 +878,25 @@ export function stitchFeatheredPatch(
       const dp = imgIdx * 4;
       const sp = patchIdx * 4;
 
-      if (a >= 1) {
+      if (a >= 0.999) {
         output[dp] = patchRgba[sp];
         output[dp + 1] = patchRgba[sp + 1];
         output[dp + 2] = patchRgba[sp + 2];
-        // 保留原图 Alpha 通道（如 PNG 透明图）
       } else {
+        // 传入 prefilledRgba 作为内缘羽化底色时，与干净预填平滑衔接，杜绝原水印亮色混回产生残影
         const invA = 1 - a;
-        output[dp] = Math.round(originalRgba[dp] * invA + patchRgba[sp] * a);
-        output[dp + 1] = Math.round(originalRgba[dp + 1] * invA + patchRgba[sp + 1] * a);
-        output[dp + 2] = Math.round(originalRgba[dp + 2] * invA + patchRgba[sp + 2] * a);
+        output[dp] = Math.round(featherBase[dp] * invA + patchRgba[sp] * a);
+        output[dp + 1] = Math.round(featherBase[dp + 1] * invA + patchRgba[sp + 1] * a);
+        output[dp + 2] = Math.round(featherBase[dp + 2] * invA + patchRgba[sp + 2] * a);
+      }
+
+      // 传入轻量预填图时同步其修补后的 Alpha 通道，兼顾透明 PNG / WebP 去水印
+      if (usePrefilledAlpha && mVal >= 255) {
+        output[dp + 3] = featherBase[dp + 3];
+      }
+
+      if (writtenMask) {
+        writtenMask[imgIdx] = 1;
       }
     }
   }
@@ -927,39 +991,59 @@ export async function executeLamaInpaint(
   );
   const prefilledRgba = prefilled.imageData.data;
 
-  // 为每个独立选区簇计算不重复的上下文裁剪窗
-  const cropRects: PixelRect[] = [];
-  const seenKeys = new Set<string>();
+  // 直接依据各簇像素外接框计算并归并裁剪窗，避免为每个簇重复分配整图遮罩
+  const cropPlans: Array<{ cropRect: PixelRect; clusterRect: PixelRect }> = [];
+  const planByKey = new Map<string, { cropRect: PixelRect; clusterRect: PixelRect }>();
   for (const box of clusters) {
-    const clusterMask = new Uint8Array(width * height);
-    for (let y = box.minY; y <= box.maxY; y += 1) {
-      const rowOff = y * width;
-      for (let x = box.minX; x <= box.maxX; x += 1) {
-        if (mask[rowOff + x] > 0) clusterMask[rowOff + x] = 255;
-      }
-    }
-    const win = computeCropWindow(width, height, clusterMask, io.inputSize, DEFAULT_CONTEXT_SCALE);
+    const clusterRect: PixelRect = {
+      x: box.minX,
+      y: box.minY,
+      width: box.maxX - box.minX + 1,
+      height: box.maxY - box.minY + 1,
+    };
+    const win = computeCropWindowFromBounds(
+      width,
+      height,
+      clusterRect,
+      io.inputSize,
+      DEFAULT_CONTEXT_SCALE,
+    );
     if (!win) continue;
     const key = `${win.cropRect.x},${win.cropRect.y},${win.cropRect.width},${win.cropRect.height}`;
-    if (!seenKeys.has(key)) {
-      seenKeys.add(key);
-      cropRects.push(win.cropRect);
+    const existing = planByKey.get(key);
+    if (existing) {
+      const minX = Math.min(existing.clusterRect.x, clusterRect.x);
+      const minY = Math.min(existing.clusterRect.y, clusterRect.y);
+      const maxX = Math.max(
+        existing.clusterRect.x + existing.clusterRect.width,
+        clusterRect.x + clusterRect.width,
+      );
+      const maxY = Math.max(
+        existing.clusterRect.y + existing.clusterRect.height,
+        clusterRect.y + clusterRect.height,
+      );
+      existing.clusterRect = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    } else {
+      const entry = { cropRect: win.cropRect, clusterRect };
+      planByKey.set(key, entry);
+      cropPlans.push(entry);
     }
   }
 
   let currentOutput = new Uint8ClampedArray(new ArrayBuffer(data.byteLength));
   currentOutput.set(data);
+  const writtenMask = new Uint8Array(width * height);
 
-  const clusterSpan = 82 / Math.max(1, cropRects.length);
+  const clusterSpan = 82 / Math.max(1, cropPlans.length);
 
-  for (let i = 0; i < cropRects.length; i += 1) {
+  for (let i = 0; i < cropPlans.length; i += 1) {
     if (signal?.aborted) {
       throw createAbortError();
     }
 
-    const cropRect = cropRects[i];
+    const { cropRect, clusterRect } = cropPlans[i];
     const basePct = 15 + i * clusterSpan;
-    const prefix = cropRects.length > 1 ? `[区域 ${i + 1}/${cropRects.length}] ` : '';
+    const prefix = cropPlans.length > 1 ? `[区域 ${i + 1}/${cropPlans.length}] ` : '';
 
     const cropRgba = extractRgbaPatch(prefilledRgba, width, cropRect);
     const cropMask = extractMaskPatch(mask, width, cropRect);
@@ -1080,6 +1164,11 @@ export async function executeLamaInpaint(
       restoredCropRgba,
       cropRect,
       featherPx,
+      {
+        featherBaseRgba: prefilledRgba,
+        clusterRect: cropPlans.length > 1 ? clusterRect : undefined,
+        writtenMask,
+      },
     );
   }
 

@@ -21,7 +21,11 @@ function clamp(v: number, min: number, max: number): number {
 }
 
 /** 计算给定二值遮罩的外接矩形与选中像素数 */
-function inspectMask(mask: Uint8Array, width: number, height: number): {
+function inspectMask(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+): {
   bbox: PixelRect | null;
   count: number;
 } {
@@ -59,10 +63,7 @@ function inspectMask(mask: Uint8Array, width: number, height: number): {
  * @param imageData 当前图像数据
  * @param rawMask 用户当前选区遮罩（0/255）
  */
-export function refineMaskToStrokes(
-  imageData: ImageData,
-  rawMask: Uint8Array,
-): StrokeRefineResult {
+export function refineMaskToStrokes(imageData: ImageData, rawMask: Uint8Array): StrokeRefineResult {
   const { width, height, data } = imageData;
   const fallbackCopy = new Uint8Array(rawMask);
 
@@ -170,7 +171,9 @@ export function refineMaskToStrokes(
   }
   borderB.sort((a, b) => a - b);
   const medBorderLuma =
-    borderLuma.length > 0 ? borderLuma.sort((a, b) => a - b)[Math.floor(borderLuma.length * 0.5)] : 128;
+    borderLuma.length > 0
+      ? borderLuma.sort((a, b) => a - b)[Math.floor(borderLuma.length * 0.5)]
+      : 128;
   const medBorderB = borderB.length > 0 ? borderB[Math.floor(borderB.length * 0.5)] : 128;
 
   const useWhite = wStrong >= 12 && (wStrong >= bStrong * 0.45 || medBorderLuma < 200);
@@ -192,7 +195,10 @@ export function refineMaskToStrokes(
     // 对浅色文字落在暖色底上（B 通道大幅抬升）做轻量补偿
     const gIdx = (ry0 + Math.floor(i / rw)) * width + (rx0 + (i % rw));
     const hitBlueLift =
-      useWhite && medBorderB < 185 && data[gIdx * 4 + 2] - medBorderB > 28 && whiteTopHat[i] >= wThresh * 0.55;
+      useWhite &&
+      medBorderB < 185 &&
+      data[gIdx * 4 + 2] - medBorderB > 28 &&
+      whiteTopHat[i] >= wThresh * 0.55;
     if (hitW || hitB || hitBlueLift) {
       coreMask[i] = 1;
     }
@@ -233,7 +239,7 @@ export function refineMaskToStrokes(
     }
   }
 
-  // 滞后补全邻近弱抗锯齿边与细描边，再执行 2~4px 圆形膨胀
+  // 对去噪后的笔画骨架执行 2~4px 圆形膨胀，包覆抗锯齿晕边与细描边
   const dilateR = clamp(Math.round(Math.min(bbox.width, bbox.height) * 0.06), 2, 4);
   const offsets: Array<[number, number]> = [];
   const r2 = dilateR * dilateR;

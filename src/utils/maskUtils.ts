@@ -356,6 +356,9 @@ export function renderMaskToCanvas(
   height: number,
   options?: MaskRenderOptions,
 ): void {
+  if (width <= 0 || height <= 0) {
+    return;
+  }
   if (canvas.width !== width) {
     canvas.width = width;
   }

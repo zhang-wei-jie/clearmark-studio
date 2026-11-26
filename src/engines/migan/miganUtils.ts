@@ -48,8 +48,16 @@ export function computeClusterCropWindows(
     const cropW = Math.min(imageWidth, side);
     const cropH = Math.min(imageHeight, side);
 
-    let cropX = clamp(Math.round(box.minX + (bw - cropW) * 0.5), 0, Math.max(0, imageWidth - cropW));
-    let cropY = clamp(Math.round(box.minY + (bh - cropH) * 0.5), 0, Math.max(0, imageHeight - cropH));
+    let cropX = clamp(
+      Math.round(box.minX + (bw - cropW) * 0.5),
+      0,
+      Math.max(0, imageWidth - cropW),
+    );
+    let cropY = clamp(
+      Math.round(box.minY + (bh - cropH) * 0.5),
+      0,
+      Math.max(0, imageHeight - cropH),
+    );
 
     // 确保裁剪框 100% 完整包含该簇全部像素
     if (cropX > box.minX) cropX = box.minX;
@@ -108,7 +116,7 @@ export function prepareMiganInput(
     const my0 = Math.floor(row * sy);
     const my1 = Math.min(size, Math.ceil((row + 1) * sy));
     const rowOff = row * cropRect.width;
-    for (let col = 0; col < cropRect.width; ) {
+    for (let col = 0; col < cropRect.width;) {
       if (cropMask[rowOff + col] === 0) {
         col++;
         continue;
@@ -138,8 +146,9 @@ export function prepareMiganInput(
 }
 
 /**
- * 将 MI-GAN 512×512 推理结果还原至原裁剪分辨率，并仅回写遮罩内像素至目标输出缓冲。
+ * 将 MI-GAN 512×512 推理结果还原至原裁剪分辨率，并仅回写当前簇遮罩内像素至目标输出缓冲。
  * - 非遮罩像素（fullMask === 0）完全不写入，保证 100% 字节级无损；
+ * - 传入 clusterRect / writtenMask 时仅写入当前簇像素，杜绝多簇重叠裁剪窗跨簇覆盖与切痕；
  * - 透明通道沿用 prefilledRgba（经轻量引擎修补后的平滑 Alpha）。
  */
 export function stitchMiganResultIntoOutput(
@@ -152,6 +161,12 @@ export function stitchMiganResultIntoOutput(
   modelRgba512: Uint8ClampedArray,
   modelSize: number = MIGAN_INPUT_SIZE,
   featherPx = 2,
+  options?: {
+    /** 限定本次仅回贴该簇外接框内的遮罩像素，避免交叠窗口提前改写其他簇 */
+    clusterRect?: PixelRect;
+    /** 跨簇已回贴标记位，防止重叠簇二次覆盖 */
+    writtenMask?: Uint8Array;
+  },
 ): void {
   const restored = resizeRgbaBilinear(
     modelRgba512,
@@ -169,15 +184,26 @@ export function stitchMiganResultIntoOutput(
     effectiveFeather,
   );
 
+  const clusterRect = options?.clusterRect;
+  const writtenMask = options?.writtenMask;
+  const cX0 = clusterRect ? clusterRect.x : cropRect.x;
+  const cY0 = clusterRect ? clusterRect.y : cropRect.y;
+  const cX1 = clusterRect ? clusterRect.x + clusterRect.width : cropRect.x + cropRect.width;
+  const cY1 = clusterRect ? clusterRect.y + clusterRect.height : cropRect.y + cropRect.height;
+
   for (let y = 0; y < cropRect.height; y++) {
-    const gRow = (cropRect.y + y) * imgW + cropRect.x;
+    const gy = cropRect.y + y;
+    if (gy < cY0 || gy >= cY1) continue;
+    const gRow = gy * imgW + cropRect.x;
     const pRow = y * cropRect.width;
     for (let x = 0; x < cropRect.width; x++) {
-      const pIdx = pRow + x;
+      const gx = cropRect.x + x;
+      if (gx < cX0 || gx >= cX1) continue;
       const gIdx = gRow + x;
       const mVal = fullMask[gIdx];
-      if (mVal === 0) continue;
+      if (mVal === 0 || writtenMask?.[gIdx]) continue;
 
+      const pIdx = pRow + x;
       const a = innerAlpha[pIdx] * (mVal / 255);
       if (a <= 0) continue;
 
@@ -201,6 +227,9 @@ export function stitchMiganResultIntoOutput(
 
       // 透明度保留轻量修复结果，兼顾透明 PNG / WebP
       outputRgba[g4 + 3] = mVal >= 255 ? prefilledRgba[g4 + 3] : originalRgba[g4 + 3];
+      if (writtenMask) {
+        writtenMask[gIdx] = 1;
+      }
     }
   }
 }

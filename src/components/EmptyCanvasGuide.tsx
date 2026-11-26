@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react';
 import { DEMO_SAMPLES, renderDemoSampleToCanvas } from '../data/demoSamples';
 
 interface EmptyCanvasGuideProps {
-  onSelectFiles: (files: FileList | File[]) => void;
   onLoadDemoSample: (sampleId: string) => Promise<void> | void;
   onLoadAllDemoSamples: () => Promise<void> | void;
   onTriggerFilePicker: () => void;
@@ -41,16 +40,14 @@ function getOrGenerateSampleThumbnails(): Record<string, string> {
   return result;
 }
 
-/** 画布空状态专业引导区：上传入口 + 内置即梦/可灵演示样图一键体验 */
+/** 画布空状态专业引导区：上传入口 + 内置即梦/可灵/豆包演示样图一键体验 */
 export function EmptyCanvasGuide({
-  onSelectFiles,
   onLoadDemoSample,
   onLoadAllDemoSamples,
   onTriggerFilePicker,
 }: EmptyCanvasGuideProps) {
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
-  const [isDraggingOver, setIsDraggingOver] = useState(false);
 
   useEffect(() => {
     setThumbnails(getOrGenerateSampleThumbnails());
@@ -79,20 +76,8 @@ export function EmptyCanvasGuide({
   return (
     <div className="flex h-full w-full items-center justify-center overflow-y-auto p-6">
       <div className="w-full max-w-3xl space-y-5">
-        {/* 主拖拽上传卡片 */}
+        {/* 主点击上传卡片（文件拖放由 App 顶层全局覆盖层统一接管，杜绝冒泡双次导入） */}
         <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setIsDraggingOver(true);
-          }}
-          onDragLeave={() => setIsDraggingOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setIsDraggingOver(false);
-            if (e.dataTransfer.files.length > 0) {
-              onSelectFiles(e.dataTransfer.files);
-            }
-          }}
           onClick={onTriggerFilePicker}
           role="button"
           tabIndex={0}
@@ -102,11 +87,11 @@ export function EmptyCanvasGuide({
               onTriggerFilePicker();
             }
           }}
-          className="group relative flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-6 py-9 text-center transition-all"
+          className="group relative flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-6 py-9 text-center transition-all hover:border-[var(--accent)]"
           style={{
-            backgroundColor: isDraggingOver ? 'var(--accent-soft)' : 'var(--bg-panel)',
-            borderColor: isDraggingOver ? 'var(--accent)' : 'var(--border-strong)',
-            boxShadow: isDraggingOver ? 'var(--accent-glow)' : 'var(--shadow-sm)',
+            backgroundColor: 'var(--bg-panel)',
+            borderColor: 'var(--border-strong)',
+            boxShadow: 'var(--shadow-sm)',
           }}
         >
           <div
@@ -124,7 +109,8 @@ export function EmptyCanvasGuide({
             拖拽图片至此处，或点击选择本地图片
           </h2>
           <p className="mt-1.5 max-w-md text-xs leading-relaxed text-[var(--text-secondary)]">
-            支持 PNG、JPG、WebP 多图批量导入，默认零下载纯本地毫秒级无痕去水印，原图全程不离设备。
+            支持 PNG、JPG、WebP、BMP、GIF、AVIF
+            多图批量导入，默认零下载纯本地毫秒级无痕去水印，原图全程不离设备。
           </p>
 
           <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5">

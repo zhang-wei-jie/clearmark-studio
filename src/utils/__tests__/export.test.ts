@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildExportFilename } from '../export';
+import { buildExportFilename, deduplicateFilename } from '../export';
 
 describe('导出文件名构建工具 (export)', () => {
   it('按目标格式拼接后缀与正确扩展名', () => {
@@ -49,5 +49,12 @@ describe('导出文件名构建工具 (export)', () => {
         stripMetadata: true,
       }),
     ).toBe('image_clean.png');
+  });
+
+  it('批量重名文件自动追加递增序号且保留扩展名', () => {
+    const used = new Set<string>();
+    expect(deduplicateFilename('photo_clean.png', used)).toBe('photo_clean.png');
+    expect(deduplicateFilename('photo_clean.png', used)).toBe('photo_clean_2.png');
+    expect(deduplicateFilename('photo_clean.png', used)).toBe('photo_clean_3.png');
   });
 });

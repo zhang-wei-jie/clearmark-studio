@@ -37,7 +37,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: '修补历史与流程',
     items: [
       { keys: ['Ctrl / ⌘', 'Z'], label: '撤销上一步修补' },
-      { keys: ['Ctrl / ⌘', 'Shift', 'Z'], label: '重做修补记录' },
+      { keys: ['Ctrl / ⌘', 'Shift', 'Z'], label: '重做修补记录（亦支持 Ctrl / ⌘ + Y）' },
       { keys: ['Esc'], label: '取消当前预设框或关闭弹窗' },
     ],
   },

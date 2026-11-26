@@ -226,14 +226,14 @@ export interface ExportConfig {
   quality: number;
   /** 导出文件名后缀，例如 '_clean' */
   filenameSuffix: string;
-  /** 是否通过 Canvas 重编码剥离 EXIF 与 AIGC 元信息 */
+  /** 通过 Canvas 重编码始终剥离 EXIF 与 AIGC 元信息（保留配置标识供调用方显式声明） */
   stripMetadata: boolean;
 }
 
 /** 单张图片的撤销/重做历史记录项 */
 export interface HistoryEntry {
   id: string;
-  /** 当前历史节点对应的完整分辨率画面 DataURL */
+  /** 当前历史节点对应的完整分辨率画面 URL（优先使用 Blob ObjectURL，环境受限时回退 DataURL） */
   dataUrl: string;
   /** 操作名称（如「原图」「快速去水印」「AI 精修 (MI-GAN)」） */
   label: string;
@@ -263,7 +263,7 @@ export interface ImageItem {
   height: number;
   /** 原始 MIME 类型 */
   mimeType: string;
-  /** 当前画面 DataURL（初始与原图一致，每次修复后更新） */
+  /** 当前画面 URL（Blob ObjectURL 或 DataURL，初始与原图一致，每次修复后更新） */
   currentDataUrl: string;
   /** 是否已执行过去水印修复 */
   processed: boolean;

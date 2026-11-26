@@ -1,5 +1,5 @@
 import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from 'lucide-react';
-import { useAppStore } from '../store/useAppStore';
+import { useAppActions, useToasts } from '../store/useAppStore';
 import type { ToastType } from '../types';
 
 const TOAST_STYLE: Record<
@@ -34,9 +34,10 @@ const TOAST_STYLE: Record<
 
 /** 全局画布区顶部居中轻量 Toast 容器（避开右侧属性面板与画布四角徽标） */
 export function ToastContainer() {
-  const { state, dismissToast } = useAppStore();
+  const toasts = useToasts();
+  const { dismissToast } = useAppActions();
 
-  if (state.toasts.length === 0) {
+  if (toasts.length === 0) {
     return null;
   }
 
@@ -45,7 +46,7 @@ export function ToastContainer() {
       className="pointer-events-none fixed inset-x-0 top-[60px] z-60 flex flex-col items-center gap-1.5 px-4 sm:pl-[68px] sm:pr-[324px]"
       aria-live="polite"
     >
-      {state.toasts.map((toast) => {
+      {toasts.map((toast) => {
         const meta = TOAST_STYLE[toast.type];
         const Icon = meta.icon;
         return (

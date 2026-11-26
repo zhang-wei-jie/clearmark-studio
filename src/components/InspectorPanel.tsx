@@ -18,9 +18,42 @@ import {
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { PRESET_PLATFORMS } from '../data/presets';
-import { useAppStore } from '../store/useAppStore';
+import {
+  shallowEqual,
+  useActiveImageMeta,
+  useAppActions,
+  useAppSelector,
+  type AppState,
+} from '../store/useAppStore';
 import type { CornerAnchor, DetectSensitivity, ExportFormat, WatermarkPlatform } from '../types';
 import { PresetCornerPreview } from './PresetCornerPreview';
+
+const selectInspectorState = (s: AppState) => {
+  let processedCount = 0;
+  for (const item of s.images) {
+    if (item.processed) processedCount += 1;
+  }
+  return {
+    brushSize: s.brushSize,
+    featherPx: s.featherPx,
+    presets: s.presets,
+    selectedPresetId: s.selectedPresetId,
+    detectSensitivity: s.detectSensitivity,
+    isDetecting: s.isDetecting,
+    isRefiningMask: s.isRefiningMask,
+    lastDetectionResult: s.lastDetectionResult,
+    engine: s.engine,
+    fastQuality: s.fastQuality,
+    miganStatus: s.miganStatus,
+    lamaStatus: s.lamaStatus,
+    isProcessing: s.isProcessing,
+    exportConfig: s.exportConfig,
+    isExporting: s.isExporting,
+    zipExportProgress: s.zipExportProgress,
+    totalImages: s.images.length,
+    processedCount,
+  };
+};
 
 type PlatformFilter = 'all' | WatermarkPlatform;
 
@@ -46,15 +79,14 @@ const EXPORT_FORMATS: ReadonlyArray<{ id: ExportFormat; label: string; hint: str
 
 function formatModelSize(bytes?: number): string {
   if (!bytes || bytes <= 0) return '';
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
 }
 
 /** 右侧专业属性与功能面板（约 308px 宽） */
 export function InspectorPanel() {
+  const state = useAppSelector(selectInspectorState, shallowEqual);
+  const { activeImage, hasActiveMask } = useActiveImageMeta();
   const {
-    state,
-    activeImage,
-    hasActiveMask,
     setBrushSize,
     setFeatherPx,
     dilateActiveMask,
@@ -73,7 +105,7 @@ export function InspectorPanel() {
     exportActiveImage,
     copyActiveImage,
     exportAllAsZip,
-  } = useAppStore();
+  } = useAppActions();
 
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>('all');
 
@@ -99,6 +131,45 @@ export function InspectorPanel() {
   const detection = state.lastDetectionResult;
   const miganStatus = state.miganStatus;
   const lamaStatus = state.lamaStatus;
+  const processedCount = state.processedCount;
+  const zipOnlyProcessed = processedCount > 0 && processedCount < state.totalImages;
+
+  const lamaBadge =
+    lamaStatus.state === 'ready'
+      ? {
+          text: `${lamaStatus.backend === 'webgpu' ? 'WebGPU' : 'WASM'} 就绪`,
+          bg: 'var(--success-soft)',
+          color: 'var(--success)',
+        }
+      : lamaStatus.state === 'cached'
+        ? {
+            text: `已缓存 ${formatModelSize(lamaStatus.cachedSizeBytes)}`,
+            bg: 'var(--info-soft)',
+            color: 'var(--info)',
+          }
+        : lamaStatus.state === 'downloading'
+          ? {
+              text: `下载中 ${Math.round(lamaStatus.progress ?? 0)}%`,
+              bg: 'var(--warning-soft)',
+              color: 'var(--warning)',
+            }
+          : lamaStatus.state === 'loading'
+            ? {
+                text: '加载中',
+                bg: 'var(--warning-soft)',
+                color: 'var(--warning)',
+              }
+            : lamaStatus.state === 'error'
+              ? {
+                  text: '模型异常',
+                  bg: 'var(--danger-soft)',
+                  color: 'var(--danger)',
+                }
+              : {
+                  text: '未下载',
+                  bg: 'var(--bg-surface)',
+                  color: 'var(--text-muted)',
+                };
 
   return (
     <aside
@@ -131,7 +202,9 @@ export function InspectorPanel() {
             <button
               type="button"
               onClick={() => void autoDetectActive()}
-              disabled={!activeImage || state.isDetecting || state.isProcessing}
+              disabled={
+                !activeImage || state.isDetecting || state.isRefiningMask || state.isProcessing
+              }
               className="flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-45"
               style={{
                 backgroundColor: 'var(--accent-soft)',
@@ -277,7 +350,12 @@ export function InspectorPanel() {
                     <button
                       type="button"
                       onClick={() => applyPresetToActive(preset.id)}
-                      disabled={!activeImage || state.isProcessing}
+                      disabled={
+                        !activeImage ||
+                        state.isProcessing ||
+                        state.isDetecting ||
+                        state.isRefiningMask
+                      }
                       className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 text-left disabled:cursor-not-allowed disabled:opacity-50"
                       title={`点击直接套用到当前图片：${preset.description}`}
                     >
@@ -297,7 +375,12 @@ export function InspectorPanel() {
                       <button
                         type="button"
                         onClick={() => openPresetBoxForActive(preset.id)}
-                        disabled={!activeImage || state.isProcessing}
+                        disabled={
+                          !activeImage ||
+                          state.isProcessing ||
+                          state.isDetecting ||
+                          state.isRefiningMask
+                        }
                         className="flex h-6.5 w-6.5 cursor-pointer items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-35"
                         title="在画布上打开可拖拽微调框"
                         aria-label={`微调 ${preset.name}`}
@@ -305,13 +388,13 @@ export function InspectorPanel() {
                         <Frame className="h-3.5 w-3.5" />
                       </button>
 
-                      {state.images.length > 1 && (
+                      {state.totalImages > 1 && (
                         <button
                           type="button"
                           onClick={() => applyPresetToAll(preset.id)}
-                          disabled={state.isProcessing}
+                          disabled={state.isProcessing || state.isDetecting || state.isRefiningMask}
                           className="flex h-6.5 w-6.5 cursor-pointer items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--success)] disabled:cursor-not-allowed disabled:opacity-35"
-                          title={`按画幅自适应套用到全部 ${state.images.length} 张图片`}
+                          title={`按画幅自适应套用到全部 ${state.totalImages} 张图片`}
                           aria-label={`将 ${preset.name} 套用到全部`}
                         >
                           <Layers className="h-3.5 w-3.5" />
@@ -382,6 +465,13 @@ export function InspectorPanel() {
               onChange={(e) => setFeatherPx(Number(e.target.value))}
               className="studio-slider w-full"
             />
+            <p className="text-[10px] text-[var(--text-muted)]">
+              {state.engine === 'fast'
+                ? '快速引擎为 1px 保边抗锯齿（0 关闭，≥4 达上限）'
+                : state.engine === 'migan'
+                  ? 'MI-GAN 引擎内缘平滑限幅 0–4 px'
+                  : 'LaMa 引擎支持 0–16 px 平滑羽化过渡'}
+            </p>
           </div>
 
           {/* 选区微调快捷按钮 */}
@@ -389,7 +479,9 @@ export function InspectorPanel() {
             <button
               type="button"
               onClick={() => void refineActiveMaskToStrokes()}
-              disabled={!hasActiveMask || state.isRefiningMask || state.isProcessing}
+              disabled={
+                !hasActiveMask || state.isRefiningMask || state.isDetecting || state.isProcessing
+              }
               className="inline-flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border py-1.5 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40"
               style={{
                 backgroundColor: 'var(--accent-soft)',
@@ -410,7 +502,9 @@ export function InspectorPanel() {
               <button
                 type="button"
                 onClick={() => dilateActiveMask(4)}
-                disabled={!activeImage?.maskBytes || state.isProcessing}
+                disabled={
+                  !hasActiveMask || state.isProcessing || state.isDetecting || state.isRefiningMask
+                }
                 className="inline-flex cursor-pointer items-center justify-center gap-1 rounded-lg border py-1.5 text-[11px] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
                 style={{
                   backgroundColor: 'var(--bg-panel-elevated)',
@@ -423,7 +517,9 @@ export function InspectorPanel() {
               <button
                 type="button"
                 onClick={clearActiveMask}
-                disabled={!hasActiveMask || state.isProcessing}
+                disabled={
+                  !hasActiveMask || state.isProcessing || state.isDetecting || state.isRefiningMask
+                }
                 className="inline-flex cursor-pointer items-center justify-center gap-1 rounded-lg border py-1.5 text-[11px] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--danger-soft)] hover:text-[var(--danger)] disabled:cursor-not-allowed disabled:opacity-40"
                 style={{
                   backgroundColor: 'var(--bg-panel-elevated)',
@@ -511,32 +607,28 @@ export function InspectorPanel() {
                 style={{
                   backgroundColor:
                     state.engine === 'lama'
-                      ? lamaStatus.state === 'ready'
-                        ? 'var(--success-soft)'
-                        : 'var(--info-soft)'
+                      ? lamaBadge.bg
                       : miganStatus.state === 'ready'
                         ? 'var(--success-soft)'
-                        : miganStatus.state === 'error'
-                          ? 'var(--danger-soft)'
-                          : 'var(--info-soft)',
+                        : miganStatus.state === 'loading'
+                          ? 'var(--warning-soft)'
+                          : miganStatus.state === 'error'
+                            ? 'var(--danger-soft)'
+                            : 'var(--info-soft)',
                   color:
                     state.engine === 'lama'
-                      ? lamaStatus.state === 'ready'
-                        ? 'var(--success)'
-                        : 'var(--info)'
+                      ? lamaBadge.color
                       : miganStatus.state === 'ready'
                         ? 'var(--success)'
-                        : miganStatus.state === 'error'
-                          ? 'var(--danger)'
-                          : 'var(--info)',
+                        : miganStatus.state === 'loading'
+                          ? 'var(--warning)'
+                          : miganStatus.state === 'error'
+                            ? 'var(--danger)'
+                            : 'var(--info)',
                 }}
               >
                 {state.engine === 'lama'
-                  ? lamaStatus.state === 'ready'
-                    ? `${lamaStatus.backend === 'webgpu' ? 'WebGPU' : 'WASM'} 就绪`
-                    : lamaStatus.state === 'cached'
-                      ? `已缓存 ${formatModelSize(lamaStatus.cachedSizeBytes)}`
-                      : '未就绪'
+                  ? lamaBadge.text
                   : miganStatus.state === 'ready'
                     ? 'WASM 就绪'
                     : miganStatus.state === 'loading'
@@ -548,16 +640,17 @@ export function InspectorPanel() {
             </div>
             <p className="mt-1 text-[10px] leading-relaxed text-[var(--text-muted)]">
               {state.engine === 'lama'
-                ? '当前使用高阶 LaMa 模型，支持分簇 512×512 局部高清重构。'
+                ? '当前使用高阶 AI（LaMa），支持分簇 512×512 局部高清重构。'
                 : '随站内置 MI-GAN 本地神经网络，大面积手动框选或复杂背景可一键 AI 无痕重构。'}
             </p>
             <div className="mt-2 grid grid-cols-2 gap-1.5">
               <button
                 type="button"
-                onClick={() => setEngine(state.engine === 'migan' ? 'fast' : 'migan')}
-                className="cursor-pointer rounded-lg border py-1.5 text-[11px] font-medium transition-colors"
+                onClick={() => setEngine(state.engine === 'fast' ? 'migan' : 'fast')}
+                disabled={state.isProcessing}
+                className="cursor-pointer rounded-lg border py-1.5 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45"
                 style={
-                  state.engine === 'migan'
+                  state.engine !== 'fast'
                     ? {
                         backgroundColor: 'var(--accent-soft)',
                         borderColor: 'var(--accent-border)',
@@ -570,7 +663,7 @@ export function InspectorPanel() {
                       }
                 }
               >
-                {state.engine === 'migan' ? '切回快速修复' : '启用 AI 精修'}
+                {state.engine !== 'fast' ? '切回快速修复' : '启用 AI 精修'}
               </button>
               <button
                 type="button"
@@ -646,7 +739,7 @@ export function InspectorPanel() {
               </div>
               <input
                 type="range"
-                min={0.5}
+                min={0.1}
                 max={1}
                 step={0.02}
                 value={state.exportConfig.quality}
@@ -729,13 +822,18 @@ export function InspectorPanel() {
 
               <button
                 type="button"
-                onClick={() => void exportAllAsZip(false)}
-                disabled={state.images.length === 0 || state.isExporting || state.isProcessing}
+                onClick={() => void exportAllAsZip(zipOnlyProcessed)}
+                disabled={state.totalImages === 0 || state.isExporting || state.isProcessing}
                 className="inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border py-1.5 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-surface)] disabled:cursor-not-allowed disabled:opacity-40"
                 style={{
                   backgroundColor: 'var(--bg-panel-elevated)',
                   borderColor: 'var(--border-subtle)',
                 }}
+                title={
+                  zipOnlyProcessed
+                    ? `仅打包已完成去水印的 ${processedCount} 张图片`
+                    : '将队列中全部图片按原分辨率打包下载为 ZIP'
+                }
               >
                 {state.zipExportProgress ? (
                   <>
@@ -747,7 +845,7 @@ export function InspectorPanel() {
                 ) : (
                   <>
                     <Archive className="h-3.5 w-3.5 text-[var(--info)]" />
-                    <span>打包 ZIP</span>
+                    <span>{zipOnlyProcessed ? `打包已修 (${processedCount})` : '打包 ZIP'}</span>
                   </>
                 )}
               </button>

@@ -62,6 +62,36 @@ export function imageDataToDataUrl(imageData: ImageData, mimeType = 'image/png')
 }
 
 /**
+ * 将 ImageData 无损编码为 Blob ObjectURL（相较 Base64 DataURL 节省约 33% 内存且脱离 JS 字符串堆），
+ * 当运行环境不支持 canvas.toBlob 或 URL.createObjectURL 时安全回退到 DataURL。
+ * 调用方在历史节点淘汰或图片移除时应负责调用 URL.revokeObjectURL 回收内存。
+ */
+export async function imageDataToBlobUrl(
+  imageData: ImageData,
+  mimeType = 'image/png',
+): Promise<string> {
+  const canvas = document.createElement('canvas');
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('浏览器无法创建 Canvas 2D 绘图上下文');
+  }
+  ctx.putImageData(imageData, 0, 0);
+
+  if (typeof canvas.toBlob === 'function' && typeof URL.createObjectURL === 'function') {
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((result) => resolve(result), mimeType);
+    });
+    if (blob) {
+      return URL.createObjectURL(blob);
+    }
+  }
+
+  return canvas.toDataURL(mimeType);
+}
+
+/**
  * 按原图分辨率将画面重新编码为目标格式 Blob。
  * 通过 Canvas 重编码会天然剥离 EXIF、XMP、IPTC 与平台 AIGC 元信息。
  */
@@ -179,7 +209,7 @@ export interface BatchZipOptions {
 }
 
 /** 处理批量打包中的重名冲突，自动追加序号 */
-function deduplicateFilename(filename: string, usedNames: Set<string>): string {
+export function deduplicateFilename(filename: string, usedNames: Set<string>): string {
   if (!usedNames.has(filename)) {
     usedNames.add(filename);
     return filename;
@@ -237,7 +267,10 @@ export async function exportBatchAsZip(
     compression: 'STORE',
   });
 
-  const dateStamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const now = new Date();
+  const dateStamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
+    now.getDate(),
+  ).padStart(2, '0')}`;
   const zipFileName = options?.zipFileName ?? `净影去水印_批量导出_${dateStamp}.zip`;
   triggerBlobDownload(zipBlob, zipFileName);
 

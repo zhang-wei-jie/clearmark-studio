@@ -14,8 +14,28 @@ import {
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useAppStore } from '../store/useAppStore';
+import {
+  shallowEqual,
+  useActiveImageMeta,
+  useAppActions,
+  useAppSelector,
+  type AppState,
+} from '../store/useAppStore';
 import type { PixelRect } from '../types';
+
+const selectCanvasWorkspaceState = (s: AppState) => ({
+  tool: s.tool,
+  brushSize: s.brushSize,
+  maskOpacity: s.maskOpacity,
+  showMask: s.showMask,
+  compareMode: s.compareMode,
+  engine: s.engine,
+  isProcessing: s.isProcessing,
+  isDetecting: s.isDetecting,
+  isRefiningMask: s.isRefiningMask,
+  currentProgress: s.currentProgress,
+  imageCount: s.images.length,
+});
 import {
   cloneMask,
   createEmptyMask,
@@ -48,13 +68,9 @@ export function CanvasWorkspace({
   onSetHoldOriginal,
   onTriggerFilePicker,
 }: CanvasWorkspaceProps) {
+  const state = useAppSelector(selectCanvasWorkspaceState, shallowEqual);
+  const { activeImage, canUndo, canRedo, hasActiveMask } = useActiveImageMeta();
   const {
-    state,
-    activeImage,
-    canUndo,
-    canRedo,
-    hasActiveMask,
-    addImages,
     loadDemoSampleById,
     loadAllDemos,
     setShowMask,
@@ -68,24 +84,22 @@ export function CanvasWorkspace({
     redoActive,
     processActiveImage,
     cancelProcessing,
-  } = useAppStore();
+  } = useAppActions();
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const currentCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const originalCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const brushRingRef = useRef<HTMLDivElement | null>(null);
 
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [splitPos, setSplitPos] = useState(50);
 
-  // 画笔光标位置（视口坐标）
-  const [cursorPos, setCursorPos] = useState<{ x: number; y: number; visible: boolean }>({
-    x: 0,
-    y: 0,
-    visible: false,
-  });
+  // 仅在光标进入/离开视口时触发一次布尔状态切换，移动坐标直接通过 ref 写入 DOM 避免 60~120Hz 重渲染
+  const [cursorVisible, setCursorVisible] = useState(false);
+  const cursorPointRef = useRef({ x: 0, y: 0 });
 
   // 矩形框选实时草稿（原图像素坐标）
   const [rectDraft, setRectDraft] = useState<PixelRect | null>(null);
@@ -211,12 +225,22 @@ export function CanvasWorkspace({
     }
   }, [activeImage, fitToScreen, viewportSize.height, viewportSize.width]);
 
+  // 切换不同图片时立即清空旧图缓存，避免新图解码完成前一帧把上一张图拉伸绘制到新尺寸画布
+  const prevDecodedImageIdRef = useRef<string | null>(null);
+
   // 异步解码当前图与原图（防范快速切图异步竞态）
   useEffect(() => {
     if (!activeImageId || !activeCurrentUrl || !activeOriginalUrl) {
+      prevDecodedImageIdRef.current = null;
       setLoadedCurrentImg(null);
       setLoadedOriginalImg(null);
       return;
+    }
+
+    if (prevDecodedImageIdRef.current !== activeImageId) {
+      prevDecodedImageIdRef.current = activeImageId;
+      setLoadedCurrentImg(null);
+      setLoadedOriginalImg(null);
     }
 
     let cancelled = false;
@@ -378,7 +402,8 @@ export function CanvasWorkspace({
       ctx.strokeStyle = 'rgba(0, 0, 0, 1)';
     } else {
       ctx.globalCompositeOperation = 'source-over';
-      ctx.strokeStyle = `rgba(244, 63, 94, ${(0.5 * state.maskOpacity + 0.12).toFixed(2)})`;
+      // 尽量与 renderMaskToCanvas 默认填充透明度 (128/255 * maskOpacity) 对齐，减少松手重绘跳变
+      ctx.strokeStyle = `rgba(244, 63, 94, ${((128 / 255) * state.maskOpacity).toFixed(3)})`;
     }
 
     ctx.beginPath();
@@ -390,13 +415,28 @@ export function CanvasWorkspace({
   };
 
   const isPanMode = spacePressed || state.tool === 'hand';
+  const isBusy = state.isProcessing || state.isDetecting || state.isRefiningMask;
   const showBrushRing =
     Boolean(activeImage) &&
     !isPanMode &&
     !holdOriginal &&
-    !state.isProcessing &&
+    !isBusy &&
     (state.tool === 'brush' || state.tool === 'eraser') &&
-    cursorPos.visible;
+    cursorVisible;
+
+  const updateBrushRingTransform = useCallback((x: number, y: number) => {
+    cursorPointRef.current = { x, y };
+    if (brushRingRef.current) {
+      brushRingRef.current.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showBrushRing && brushRingRef.current) {
+      const { x, y } = cursorPointRef.current;
+      brushRingRef.current.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+    }
+  }, [showBrushRing]);
 
   const handleViewportPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!activeImage) return;
@@ -415,7 +455,7 @@ export function CanvasWorkspace({
       return;
     }
 
-    if (e.button !== 0 || state.isProcessing || holdOriginal) return;
+    if (e.button !== 0 || isBusy || holdOriginal) return;
     if (state.tool === 'preset-box') return;
 
     const pt = clientToImagePoint(e.clientX, e.clientY);
@@ -477,11 +517,10 @@ export function CanvasWorkspace({
     const el = viewportRef.current;
     if (el) {
       const rect = el.getBoundingClientRect();
-      setCursorPos({
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
-        visible: true,
-      });
+      updateBrushRingTransform(e.clientX - rect.left, e.clientY - rect.top);
+      if (!cursorVisible) {
+        setCursorVisible(true);
+      }
     }
 
     if (!activeImage) return;
@@ -594,9 +633,6 @@ export function CanvasWorkspace({
         style={{ backgroundColor: 'var(--bg-canvas)' }}
       >
         <EmptyCanvasGuide
-          onSelectFiles={(files) => {
-            void addImages(files, true);
-          }}
           onLoadDemoSample={loadDemoSampleById}
           onLoadAllDemoSamples={loadAllDemos}
           onTriggerFilePicker={onTriggerFilePicker}
@@ -637,7 +673,7 @@ export function CanvasWorkspace({
         onPointerMove={handleViewportPointerMove}
         onPointerUp={finishViewportInteraction}
         onPointerCancel={finishViewportInteraction}
-        onPointerLeave={() => setCursorPos((prev) => ({ ...prev, visible: false }))}
+        onPointerLeave={() => setCursorVisible(false)}
       >
         {/* 左上角轻信息状态条 */}
         <div
@@ -766,6 +802,14 @@ export function CanvasWorkspace({
                     e.currentTarget.releasePointerCapture(e.pointerId);
                   }
                 }}
+                onPointerCancel={(e) => {
+                  if (!isDraggingSplitRef.current) return;
+                  e.stopPropagation();
+                  isDraggingSplitRef.current = false;
+                  if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                  }
+                }}
                 title="左右拖动对比去水印前后效果"
               >
                 <div className="h-full w-0.5 bg-white shadow-[0_0_8px_rgba(0,0,0,0.65)]" />
@@ -811,15 +855,15 @@ export function CanvasWorkspace({
             </div>
           )}
 
-          {/* 图层 4：可视化交互预设精调框 */}
-          {activeImage.activePresetBox && !holdOriginal && (
+          {/* 图层 4：可视化交互预设精调框（处理/检测/抠笔画进行中暂时隐藏以防止并发改写选区） */}
+          {activeImage.activePresetBox && !holdOriginal && !isBusy && (
             <PresetBoxOverlay
               box={activeImage.activePresetBox}
               imageWidth={activeImage.width}
               imageHeight={activeImage.height}
               renderedWidth={renderedWidth}
               renderedHeight={renderedHeight}
-              totalImages={state.images.length}
+              totalImages={state.imageCount}
               onChange={(nextBox) => setActivePresetBox(nextBox)}
               onApplyToMask={() => commitActivePresetBoxToMask(false)}
               onSaveCustomPreset={(name) => {
@@ -831,13 +875,13 @@ export function CanvasWorkspace({
           )}
         </div>
 
-        {/* 与缩放比例同步的自定义画笔 / 橡皮擦圆环光标 */}
+        {/* 与缩放比例同步的自定义画笔 / 橡皮擦圆环光标（通过 ref 直接更新 transform 避免重渲染） */}
         {showBrushRing && (
           <div
-            className="pointer-events-none absolute z-30 -translate-x-1/2 -translate-y-1/2 rounded-full"
+            ref={brushRingRef}
+            className="pointer-events-none absolute top-0 left-0 z-30 rounded-full will-change-transform"
             style={{
-              left: cursorPos.x,
-              top: cursorPos.y,
+              transform: `translate3d(${cursorPointRef.current.x}px, ${cursorPointRef.current.y}px, 0) translate(-50%, -50%)`,
               width: brushDiameterPx,
               height: brushDiameterPx,
               border:
@@ -924,7 +968,7 @@ export function CanvasWorkspace({
             <button
               type="button"
               onClick={undoActive}
-              disabled={!canUndo || state.isProcessing}
+              disabled={!canUndo || isBusy}
               className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-35"
               title="撤销 (⌘Z)"
               aria-label="撤销"
@@ -934,7 +978,7 @@ export function CanvasWorkspace({
             <button
               type="button"
               onClick={redoActive}
-              disabled={!canRedo || state.isProcessing}
+              disabled={!canRedo || isBusy}
               className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-35"
               title="重做 (⇧⌘Z)"
               aria-label="重做"
@@ -1041,22 +1085,29 @@ export function CanvasWorkspace({
             <button
               type="button"
               onClick={() => void processActiveImage()}
-              disabled={!hasActiveMask}
+              disabled={!hasActiveMask || state.isDetecting || state.isRefiningMask}
               className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-xl px-4 text-xs font-semibold text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45"
               style={{
                 backgroundColor: 'var(--accent)',
-                boxShadow: hasActiveMask ? 'var(--accent-glow)' : 'none',
+                boxShadow:
+                  hasActiveMask && !state.isDetecting && !state.isRefiningMask
+                    ? 'var(--accent-glow)'
+                    : 'none',
               }}
               title={
-                hasActiveMask
-                  ? `使用${
-                      state.engine === 'migan'
-                        ? 'AI 精修 · MI-GAN'
-                        : state.engine === 'lama'
-                          ? 'AI 增强 · LaMa'
-                          : '快速轻量引擎'
-                    }去除选中水印`
-                  : '请先涂抹水印、套用右侧预设或点击一键检测'
+                state.isDetecting
+                  ? '正在自动检测角落水印，请稍候完成'
+                  : state.isRefiningMask
+                    ? '正在提取框内水印笔画，请稍候完成'
+                    : hasActiveMask
+                      ? `使用${
+                          state.engine === 'migan'
+                            ? 'AI 精修 · MI-GAN'
+                            : state.engine === 'lama'
+                              ? '高阶 AI · LaMa'
+                              : '快速轻量引擎'
+                        }去除选中水印`
+                      : '请先涂抹水印、套用右侧预设或点击一键检测'
               }
             >
               <Sparkles className="h-3.5 w-3.5 shrink-0" />

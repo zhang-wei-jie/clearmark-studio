@@ -15,8 +15,19 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { DEMO_SAMPLES } from '../data/demoSamples';
-import { useAppStore } from '../store/useAppStore';
+import { shallowEqual, useAppActions, useAppSelector, type AppState } from '../store/useAppStore';
 import type { LamaModelStatus, MiganModelStatus } from '../types';
+
+const selectHeaderState = (s: AppState) => ({
+  hasActiveImage: s.activeImageId !== null,
+  engine: s.engine,
+  miganStatus: s.miganStatus,
+  lamaStatus: s.lamaStatus,
+  isProcessing: s.isProcessing,
+  theme: s.theme,
+  exportFormat: s.exportConfig.format,
+  isExporting: s.isExporting,
+});
 
 interface HeaderProps {
   onTriggerFilePicker: () => void;
@@ -75,9 +86,8 @@ function getLamaBadgeInfo(status: LamaModelStatus): {
 
 /** 顶部专业修图工作台导航栏 */
 export function Header({ onTriggerFilePicker }: HeaderProps) {
+  const state = useAppSelector(selectHeaderState, shallowEqual);
   const {
-    state,
-    activeImage,
     setEngine,
     setAiModelModalOpen,
     toggleTheme,
@@ -85,11 +95,20 @@ export function Header({ onTriggerFilePicker }: HeaderProps) {
     copyActiveImage,
     loadDemoSampleById,
     loadAllDemos,
-  } = useAppStore();
+  } = useAppActions();
 
   const [demoMenuOpen, setDemoMenuOpen] = useState(false);
   const [copiedRecently, setCopiedRecently] = useState(false);
   const demoMenuRef = useRef<HTMLDivElement | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!demoMenuOpen) return;
@@ -109,12 +128,20 @@ export function Header({ onTriggerFilePicker }: HeaderProps) {
     state.lamaStatus.state === 'cached' ||
     state.lamaStatus.state === 'ready' ||
     state.lamaStatus.state === 'downloading' ||
-    state.lamaStatus.state === 'loading';
+    state.lamaStatus.state === 'loading' ||
+    state.lamaStatus.state === 'error';
 
   const handleCopy = async () => {
-    await copyActiveImage();
+    const ok = await copyActiveImage();
+    if (!ok) return;
     setCopiedRecently(true);
-    window.setTimeout(() => setCopiedRecently(false), 1600);
+    if (copyTimerRef.current !== null) {
+      window.clearTimeout(copyTimerRef.current);
+    }
+    copyTimerRef.current = window.setTimeout(() => {
+      copyTimerRef.current = null;
+      setCopiedRecently(false);
+    }, 1600);
   };
 
   return (
@@ -200,7 +227,8 @@ export function Header({ onTriggerFilePicker }: HeaderProps) {
         <button
           type="button"
           onClick={() => setEngine('fast')}
-          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-all"
+          disabled={state.isProcessing}
+          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-55"
           style={
             state.engine === 'fast'
               ? {
@@ -212,7 +240,7 @@ export function Header({ onTriggerFilePicker }: HeaderProps) {
                   color: 'var(--text-secondary)',
                 }
           }
-          title="纯前端零依赖轻量去水印（Telea + 拉普拉斯调和 + 半透明逆向还原），毫秒级无马赛克"
+          title="纯前端零依赖轻量去水印（Telea + 拉普拉斯调和 + 半透明高频补偿），毫秒级无马赛克"
         >
           <Zap className="h-3.5 w-3.5" />
           <span>快速修复</span>
@@ -221,7 +249,8 @@ export function Header({ onTriggerFilePicker }: HeaderProps) {
         <button
           type="button"
           onClick={() => setEngine('migan')}
-          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-all"
+          disabled={state.isProcessing}
+          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-55"
           style={
             state.engine === 'migan'
               ? {
@@ -264,7 +293,8 @@ export function Header({ onTriggerFilePicker }: HeaderProps) {
                 setAiModelModalOpen(true);
               }
             }}
-            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all"
+            disabled={state.isProcessing}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-55"
             style={
               state.engine === 'lama'
                 ? {
@@ -404,7 +434,7 @@ export function Header({ onTriggerFilePicker }: HeaderProps) {
         <button
           type="button"
           onClick={() => void handleCopy()}
-          disabled={!activeImage || state.isProcessing}
+          disabled={!state.hasActiveImage || state.isProcessing}
           className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-surface)] disabled:cursor-not-allowed disabled:opacity-40"
           style={{
             backgroundColor: 'var(--bg-surface)',
@@ -424,20 +454,20 @@ export function Header({ onTriggerFilePicker }: HeaderProps) {
         <button
           type="button"
           onClick={() => void exportActiveImage()}
-          disabled={!activeImage || state.isExporting || state.isProcessing}
+          disabled={!state.hasActiveImage || state.isExporting || state.isProcessing}
           className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
           style={{
             backgroundColor: 'var(--accent)',
-            boxShadow: activeImage ? 'var(--shadow-sm)' : 'none',
+            boxShadow: state.hasActiveImage ? 'var(--shadow-sm)' : 'none',
           }}
-          title={`保持原图分辨率导出为 ${state.exportConfig.format.toUpperCase()}`}
+          title={`保持原图分辨率导出为 ${state.exportFormat.toUpperCase()}`}
         >
           {state.isExporting ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : (
             <Download className="h-3.5 w-3.5" />
           )}
-          <span>导出 {state.exportConfig.format.toUpperCase()}</span>
+          <span>导出 {state.exportFormat.toUpperCase()}</span>
         </button>
       </div>
     </header>

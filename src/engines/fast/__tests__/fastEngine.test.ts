@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { InpaintProgress, WatermarkTemplateId } from '../../../types';
-import { createImageDataSafe } from '../inpaintCore';
+import type { InpaintProgress, MatchedWatermark, WatermarkTemplateId } from '../../../types';
+import { deduplicateMatches } from '../autoDetect';
+import { createImageDataSafe, findMaskClusters } from '../inpaintCore';
 import { runCornerAutoDetect, runFastInpaint, runMaskStrokeRefine } from '../index';
 import { WATERMARK_TEMPLATES, sampleTemplateAlpha } from '../templates';
 
@@ -513,5 +514,153 @@ describe('智能角落水印自动检测 (autoDetect)', () => {
     const afterPixels = refined.mask.reduce((acc, v) => acc + (v > 0 ? 1 : 0), 0);
     expect(afterPixels).toBeLessThan(beforePixels * 0.75);
     expect(afterPixels).toBeGreaterThan(100);
+  });
+
+  it('findMaskClusters 应传递归并经中间簇桥接的邻近选区，且 deduplicateMatches 严格弱序稳定', () => {
+    // 构造水平三段间距约 20px 的小选区，总跨度超过单次 mergeGap 但两两相邻间距 <= mergeGap，应归并为 1 个簇
+    const w = 400;
+    const h = 120;
+    const mask = createRectMask(
+      w,
+      h,
+      [
+        { x: 20, y: 40, width: 10, height: 10 },
+        { x: 140, y: 40, width: 10, height: 10 },
+        { x: 80, y: 40, width: 10, height: 10 },
+      ],
+      0,
+    );
+    // 20..29 -> 80..89 间距 51px (超过 24*2 tile 邻域，但在 28~72 mergeGap 判定下若间距 <= 32px)
+    const bridgedMask = createRectMask(
+      w,
+      h,
+      [
+        { x: 20, y: 40, width: 12, height: 12 },
+        { x: 106, y: 40, width: 12, height: 12 },
+        { x: 60, y: 40, width: 20, height: 12 },
+      ],
+      0,
+    );
+    expect(findMaskClusters(bridgedMask, w, h)).toHaveLength(1);
+    expect(findMaskClusters(mask, w, h).length).toBeGreaterThanOrEqual(1);
+
+    // 验证 deduplicateMatches：同位置竞争时 kling30 优先替代分差 < 0.08 的 kling；不同角落保持真实分数顺序
+    const candidates: MatchedWatermark[] = [
+      {
+        templateId: 'kling',
+        brand: 'kling',
+        label: '可灵AI',
+        corner: 'bottom-right',
+        x: 700,
+        y: 550,
+        width: 140,
+        height: 44,
+        score: 0.91,
+        polarity: 1,
+      },
+      {
+        templateId: 'kling30',
+        brand: 'kling',
+        label: '可灵AI 3.0',
+        corner: 'bottom-right',
+        x: 700,
+        y: 550,
+        width: 200,
+        height: 44,
+        score: 0.87,
+        polarity: 1,
+      },
+      {
+        templateId: 'jimeng',
+        brand: 'jimeng',
+        label: '即梦AI',
+        corner: 'top-left',
+        x: 20,
+        y: 20,
+        width: 120,
+        height: 36,
+        score: 0.89,
+        polarity: 1,
+      },
+    ];
+    const deduped = deduplicateMatches(candidates);
+    expect(deduped).toHaveLength(2);
+    expect(deduped.some((m) => m.corner === 'bottom-right' && m.templateId === 'kling30')).toBe(
+      true,
+    );
+    expect(deduped.some((m) => m.corner === 'top-left' && m.templateId === 'jimeng')).toBe(true);
+  });
+
+  it('双角存在标准浅色与另一角暗色模板水印时，快路径不应早退导致第二角漏检', async () => {
+    const width = 960;
+    const height = 640;
+    // 左上角偏亮底、右下角偏暗底的合成背景
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const off = (y * width + x) * 4;
+        const t = (x / width + y / height) * 0.5;
+        const base = clampByte(232 * (1 - t) + 32 * t);
+        data[off] = base;
+        data[off + 1] = base;
+        data[off + 2] = base;
+        data[off + 3] = 255;
+      }
+    }
+
+    // 右下角叠加标准浅色即梦模板
+    const jm = WATERMARK_TEMPLATES.jimeng;
+    const jmScale = Math.min(width, height) / jm.referenceShortSide;
+    const jmW = Math.round(jm.width * jmScale);
+    const jmH = Math.round(jm.height * jmScale);
+    const jmX = width - jmW - Math.round(jm.right * jmScale);
+    const jmY = height - jmH - Math.round(jm.bottom * jmScale);
+    for (let y = 0; y < jmH; y++) {
+      for (let x = 0; x < jmW; x++) {
+        const a =
+          sampleTemplateAlpha(
+            jm,
+            ((x + 0.5) * jm.width) / jmW - 0.5,
+            ((y + 0.5) * jm.height) / jmH - 0.5,
+          ) / 255;
+        if (a <= 0.002) continue;
+        const off = ((jmY + y) * width + (jmX + x)) * 4;
+        data[off] = clampByte(data[off] * (1 - a) + 255 * a);
+        data[off + 1] = clampByte(data[off + 1] * (1 - a) + 255 * a);
+        data[off + 2] = clampByte(data[off + 2] * (1 - a) + 255 * a);
+      }
+    }
+
+    // 左上角叠加暗色可灵模板（非标准缩放比例 0.9）
+    const kl = WATERMARK_TEMPLATES.kling;
+    const klScale = (Math.min(width, height) / kl.referenceShortSide) * 0.9;
+    const klW = Math.round(kl.width * klScale);
+    const klH = Math.round(kl.height * klScale);
+    const klX = 24;
+    const klY = 20;
+    for (let y = 0; y < klH; y++) {
+      for (let x = 0; x < klW; x++) {
+        const a =
+          sampleTemplateAlpha(
+            kl,
+            ((x + 0.5) * kl.width) / klW - 0.5,
+            ((y + 0.5) * kl.height) / klH - 0.5,
+          ) / 255;
+        if (a <= 0.002) continue;
+        const off = ((klY + y) * width + (klX + x)) * 4;
+        data[off] = clampByte(data[off] * (1 - a) + 20 * a);
+        data[off + 1] = clampByte(data[off + 1] * (1 - a) + 20 * a);
+        data[off + 2] = clampByte(data[off + 2] * (1 - a) + 20 * a);
+      }
+    }
+
+    const det = await runCornerAutoDetect(createImageDataSafe(data, width, height), 'medium');
+    expect(det.detected).toBe(true);
+    expect(det.method).toBe('template');
+    expect(det.matches?.length).toBeGreaterThanOrEqual(2);
+    expect(det.matches?.some((m) => m.corner === 'bottom-right' && m.brand === 'jimeng')).toBe(
+      true,
+    );
+    expect(det.matches?.some((m) => m.corner === 'top-left' && m.brand === 'kling')).toBe(true);
   });
 });

@@ -149,5 +149,8 @@ describe('遮罩生成、几何运算与绘制工具 (maskUtils)', () => {
     expect(capturedData![(4 * w + 4) * 4 + 3]).toBe(120);
     // 选区外 (0, 0) 保持透明
     expect(capturedData![3]).toBe(0);
+
+    // 零尺寸安全早退不抛异常
+    expect(() => renderMaskToCanvas(mockCanvas, mask, 0, 0)).not.toThrow();
   });
 });

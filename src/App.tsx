@@ -8,7 +8,28 @@ import { InspectorPanel } from './components/InspectorPanel';
 import { ShortcutHelpModal } from './components/ShortcutHelpModal';
 import { ToastContainer } from './components/ToastContainer';
 import { Toolbar } from './components/Toolbar';
-import { AppProvider, useAppStore } from './store/useAppStore';
+import {
+  AppProvider,
+  shallowEqual,
+  useAppActions,
+  useAppSelector,
+  type AppState,
+  type AppStoreInstance,
+} from './store/useAppStore';
+
+const selectShellState = (s: AppState) => {
+  const active = s.activeImageId
+    ? (s.images.find((item) => item.id === s.activeImageId) ?? null)
+    : null;
+  return {
+    activeImageId: active?.id ?? null,
+    activeImageProcessed: Boolean(active?.processed),
+    hasActivePresetBox: Boolean(active?.activePresetBox),
+    aiModelModalOpen: s.aiModelModalOpen,
+    brushSize: s.brushSize,
+    isBusy: s.isProcessing || s.isDetecting || s.isRefiningMask,
+  };
+};
 
 /** 判断焦点是否位于可编辑表单元素中，避免拦截用户输入文字 */
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -20,15 +41,15 @@ function isEditableTarget(target: EventTarget | null): boolean {
 /** 内部工作台外壳：统筹全局拖拽、剪贴板粘贴、键盘快捷键与弹窗 */
 function WorkspaceShell() {
   const {
-    state,
-    activeImage,
-    addImages,
-    setTool,
-    setBrushSize,
-    setActivePresetBox,
-    undoActive,
-    redoActive,
-  } = useAppStore();
+    activeImageId,
+    activeImageProcessed,
+    hasActivePresetBox,
+    aiModelModalOpen,
+    brushSize,
+    isBusy,
+  } = useAppSelector(selectShellState, shallowEqual);
+  const { addImages, setTool, setBrushSize, setActivePresetBox, undoActive, redoActive } =
+    useAppActions();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dragCounterRef = useRef(0);
@@ -45,7 +66,7 @@ function WorkspaceShell() {
   // 切换图片时自动退出按住原图状态
   useEffect(() => {
     setHoldOriginal(false);
-  }, [activeImage?.id]);
+  }, [activeImageId]);
 
   // 全局文件拖拽导入监听（AI 模型弹窗开启时不抢占 .onnx 拖拽）
   useEffect(() => {
@@ -53,19 +74,19 @@ function WorkspaceShell() {
       Boolean(e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files'));
 
     const onDragEnter = (e: DragEvent) => {
-      if (state.aiModelModalOpen || !hasFiles(e)) return;
+      if (aiModelModalOpen || !hasFiles(e)) return;
       e.preventDefault();
       dragCounterRef.current += 1;
       setIsGlobalDragging(true);
     };
 
     const onDragOver = (e: DragEvent) => {
-      if (state.aiModelModalOpen || !hasFiles(e)) return;
+      if (aiModelModalOpen || !hasFiles(e)) return;
       e.preventDefault();
     };
 
     const onDragLeave = (e: DragEvent) => {
-      if (state.aiModelModalOpen) return;
+      if (aiModelModalOpen) return;
       e.preventDefault();
       dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
       if (dragCounterRef.current === 0) {
@@ -74,7 +95,7 @@ function WorkspaceShell() {
     };
 
     const onDrop = (e: DragEvent) => {
-      if (state.aiModelModalOpen) return;
+      if (aiModelModalOpen) return;
       e.preventDefault();
       dragCounterRef.current = 0;
       setIsGlobalDragging(false);
@@ -94,25 +115,30 @@ function WorkspaceShell() {
       window.removeEventListener('dragleave', onDragLeave);
       window.removeEventListener('drop', onDrop);
     };
-  }, [addImages, state.aiModelModalOpen]);
+  }, [addImages, aiModelModalOpen]);
 
   // 全局剪贴板图片粘贴监听（Ctrl/Cmd + V）
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
-      if (isEditableTarget(e.target) || state.aiModelModalOpen) return;
+      if (isEditableTarget(e.target) || aiModelModalOpen) return;
       const items = e.clipboardData?.items;
       if (!items || items.length === 0) return;
 
       const imageFiles: File[] = [];
+      const pasteStamp = Date.now();
+      let pasteIndex = 0;
       for (const item of Array.from(items)) {
         if (item.kind === 'file' && item.type.startsWith('image/')) {
           const file = item.getAsFile();
           if (file) {
-            const ext = file.type.split('/')[1] || 'png';
+            const rawSub = (file.type.split('/')[1] || 'png').toLowerCase();
+            const ext = rawSub === 'jpeg' ? 'jpg' : /^[a-z0-9]{2,5}$/.test(rawSub) ? rawSub : 'png';
+            pasteIndex += 1;
+            const seq = pasteIndex > 1 ? `_${pasteIndex}` : '';
             const named =
               file.name && file.name !== 'image.png'
                 ? file
-                : new File([file], `剪贴板图片_${Date.now()}.${ext}`, { type: file.type });
+                : new File([file], `剪贴板图片_${pasteStamp}${seq}.${ext}`, { type: file.type });
             imageFiles.push(named);
           }
         }
@@ -126,7 +152,7 @@ function WorkspaceShell() {
 
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [addImages, state.aiModelModalOpen]);
+  }, [addImages, aiModelModalOpen]);
 
   // 全局专业修图快捷键监听
   useEffect(() => {
@@ -136,8 +162,9 @@ function WorkspaceShell() {
       const metaOrCtrl = e.metaKey || e.ctrlKey;
       const lower = e.key.toLowerCase();
 
-      // 撤销 / 重做
+      // 撤销 / 重做（弹窗开启或正在执行检测、抠笔画、修复任务时禁用，与按钮禁用态保持一致）
       if (metaOrCtrl && lower === 'z') {
+        if (aiModelModalOpen || shortcutsOpen || isBusy) return;
         e.preventDefault();
         if (e.shiftKey) {
           redoActive();
@@ -148,13 +175,14 @@ function WorkspaceShell() {
       }
 
       if (metaOrCtrl && lower === 'y') {
+        if (aiModelModalOpen || shortcutsOpen || isBusy) return;
         e.preventDefault();
         redoActive();
         return;
       }
 
       // 弹窗打开时不响应画布单键工具切换
-      if (state.aiModelModalOpen || shortcutsOpen) return;
+      if (aiModelModalOpen || shortcutsOpen) return;
       if (metaOrCtrl || e.altKey) return;
 
       switch (lower) {
@@ -180,24 +208,24 @@ function WorkspaceShell() {
           break;
         case '[':
           e.preventDefault();
-          setBrushSize(state.brushSize - (state.brushSize > 40 ? 8 : 4));
+          setBrushSize(brushSize - (brushSize > 40 ? 8 : 4));
           break;
         case ']':
           e.preventDefault();
-          setBrushSize(state.brushSize + (state.brushSize >= 40 ? 8 : 4));
+          setBrushSize(brushSize + (brushSize >= 40 ? 8 : 4));
           break;
         case ' ':
           e.preventDefault();
           setSpacePressed(true);
           break;
         case '\\':
-          if (activeImage?.processed) {
+          if (activeImageProcessed) {
             e.preventDefault();
             setHoldOriginal(true);
           }
           break;
         case 'escape':
-          if (activeImage?.activePresetBox) {
+          if (hasActivePresetBox) {
             e.preventDefault();
             setActivePresetBox(null);
           }
@@ -227,15 +255,16 @@ function WorkspaceShell() {
       window.removeEventListener('blur', onBlur);
     };
   }, [
-    activeImage?.activePresetBox,
-    activeImage?.processed,
+    activeImageProcessed,
+    aiModelModalOpen,
+    brushSize,
+    hasActivePresetBox,
+    isBusy,
     redoActive,
     setActivePresetBox,
     setBrushSize,
     setTool,
     shortcutsOpen,
-    state.aiModelModalOpen,
-    state.brushSize,
     undoActive,
   ]);
 
@@ -308,7 +337,7 @@ function WorkspaceShell() {
               松开鼠标即可导入图片至工作台
             </div>
             <p className="text-xs text-[var(--text-secondary)]">
-              支持单张或多张 PNG / JPG / WebP 批量导入，纯浏览器本地处理
+              支持单张或多张 PNG / JPG / WebP / BMP / GIF / AVIF 批量导入，纯浏览器本地处理
             </p>
           </div>
         </div>
@@ -318,9 +347,9 @@ function WorkspaceShell() {
 }
 
 /** 净影去水印 · 应用根组件 */
-export default function App() {
+export default function App({ store }: { store?: AppStoreInstance } = {}) {
   return (
-    <AppProvider>
+    <AppProvider store={store}>
       <WorkspaceShell />
     </AppProvider>
   );

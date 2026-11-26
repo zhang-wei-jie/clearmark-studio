@@ -8,12 +8,7 @@
  * 4. 仅将遮罩内 RGB 羽化回贴，原图非遮罩区 100% 字节级无损。
  */
 
-import type {
-  InpaintInput,
-  InpaintOutput,
-  InpaintProgress,
-  MiganModelStatus,
-} from '../../types';
+import type { InpaintInput, InpaintOutput, InpaintProgress, MiganModelStatus } from '../../types';
 import { createAbortError, createImageDataSafe, inpaintFastAsync } from '../fast/inpaintCore';
 import {
   MIGAN_INPUT_SIZE,
@@ -39,6 +34,7 @@ let currentStatus: MiganModelStatus = {
 const listeners = new Set<StatusListener>();
 
 let activeWorker: Worker | null = null;
+let activeJobDisposeAbort: (() => void) | null = null;
 let nextTaskId = 1;
 let serialQueue: Promise<unknown> = Promise.resolve();
 
@@ -83,10 +79,16 @@ function terminateMiganWorker(): void {
   }
 }
 
-/** 主动释放 MI-GAN Worker 及其占用的模型内存 */
+/** 主动释放 MI-GAN Worker 及其占用的模型内存；若存在进行中任务，立即以 AbortError 解锁串行队列 */
 export async function disposeMiganSession(): Promise<void> {
-  terminateMiganWorker();
-  updateStatus({ state: 'idle', sizeBytes: MIGAN_SIZE_BYTES });
+  const abortRunning = activeJobDisposeAbort;
+  activeJobDisposeAbort = null;
+  if (abortRunning) {
+    abortRunning();
+  } else {
+    terminateMiganWorker();
+    updateStatus({ state: 'idle', sizeBytes: MIGAN_SIZE_BYTES });
+  }
 }
 
 function sendWorkerJob(
@@ -105,7 +107,12 @@ function sendWorkerJob(
   const worker = getOrCreateMiganWorker();
 
   return new Promise<MiganWorkerResponse>((resolve, reject) => {
+    let settled = false;
+
     const cleanup = () => {
+      if (activeJobDisposeAbort === onDispose) {
+        activeJobDisposeAbort = null;
+      }
       worker.onmessage = null;
       worker.onerror = null;
       worker.onmessageerror = null;
@@ -113,6 +120,8 @@ function sendWorkerJob(
     };
 
     const failAndReset = (err: Error, isAbort = false) => {
+      if (settled) return;
+      settled = true;
       cleanup();
       terminateMiganWorker();
       if (isAbort) {
@@ -127,6 +136,11 @@ function sendWorkerJob(
       failAndReset(createAbortError('已取消 MI-GAN 本地 AI 精修'), true);
     };
 
+    const onDispose = () => {
+      failAndReset(createAbortError('已释放 MI-GAN 推理会话，当前任务已中断'), true);
+    };
+
+    activeJobDisposeAbort = onDispose;
     signal?.addEventListener('abort', onAbort, { once: true });
 
     worker.onerror = (ev: ErrorEvent) => {
@@ -159,6 +173,8 @@ function sendWorkerJob(
         return;
       }
 
+      if (settled) return;
+      settled = true;
       cleanup();
       if (data.type === 'ready' || data.type === 'result') {
         updateStatus({
@@ -258,6 +274,7 @@ export async function runMiganInpaint(
 
     const outRgba = new Uint8ClampedArray(new ArrayBuffer(data.byteLength));
     outRgba.set(data);
+    const writtenMask = new Uint8Array(expectedLen);
 
     // 步骤 2：逐簇截取 512×512 上下文并送入独立 Worker 推理
     const clusterSpan = 74 / plans.length;
@@ -300,7 +317,10 @@ export async function runMiganInpaint(
               p.phase === 'loading'
                 ? Math.round(basePct + (p.percent / 100) * clusterSpan * 0.55)
                 : Math.round(basePct + clusterSpan * 0.72);
-            onProgress?.({ stage: p.phase === 'loading' ? p.stage : `${prefix}${p.stage}`, percent: pct });
+            onProgress?.({
+              stage: p.phase === 'loading' ? p.stage : `${prefix}${p.stage}`,
+              percent: pct,
+            });
           },
         },
       );
@@ -324,6 +344,10 @@ export async function runMiganInpaint(
         new Uint8ClampedArray(reply.rgbaBuffer),
         MIGAN_INPUT_SIZE,
         featherPx,
+        {
+          clusterRect: plans.length > 1 ? plan.clusterRect : undefined,
+          writtenMask,
+        },
       );
     }
 

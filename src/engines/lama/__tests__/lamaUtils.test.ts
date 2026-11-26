@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   computeCropWindow,
+  computeCropWindowFromBounds,
   computeInnerFeatherAlpha,
   detectOutputValueRange,
   packLamaInputs,
@@ -350,6 +351,72 @@ describe('羽化回贴与缩放工具 - 保证非遮罩区 100% 无损', () => {
     const upRgba = resizeRgbaBilinear(srcRgba, 16, 16, 32, 32);
     expect(upRgba.length).toBe(32 * 32 * 4);
     expect(upRgba[0]).toBe(180);
+  });
+
+  it('stitchFeatheredPatch 传入 featherBaseRgba 时内缘不混回原水印色且同步预填 Alpha', () => {
+    const w = 40;
+    const h = 40;
+    // 原图遮罩区涂满刺眼纯白水印 (255, 255, 255, 255)，外部背景为暗蓝 (20, 30, 40, 180)
+    const original = new Uint8ClampedArray(w * h * 4);
+    const prefilled = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i += 1) {
+      const p = i * 4;
+      original[p] = 20;
+      original[p + 1] = 30;
+      original[p + 2] = 40;
+      original[p + 3] = 180;
+
+      prefilled[p] = 24;
+      prefilled[p + 1] = 34;
+      prefilled[p + 2] = 44;
+      prefilled[p + 3] = 180;
+    }
+
+    const mask = new Uint8Array(w * h);
+    fillMaskRect(mask, w, 12, 12, 16, 16);
+    for (let y = 12; y < 28; y += 1) {
+      for (let x = 12; x < 28; x += 1) {
+        const p = (y * w + x) * 4;
+        original[p] = 255;
+        original[p + 1] = 255;
+        original[p + 2] = 255;
+        original[p + 3] = 255;
+      }
+    }
+
+    const patchRgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < patchRgba.length; i += 4) {
+      patchRgba[i] = 22;
+      patchRgba[i + 1] = 32;
+      patchRgba[i + 2] = 42;
+      patchRgba[i + 3] = 255;
+    }
+
+    const stitched = stitchFeatheredPatch(
+      original,
+      w,
+      h,
+      mask,
+      patchRgba,
+      { x: 0, y: 0, width: w, height: h },
+      6,
+      { featherBaseRgba: prefilled },
+    );
+
+    // 遮罩内缘 (12, 20) 绝不应混入 255 原水印高亮色，而应紧贴暗蓝背景，且 Alpha 同步为预填值 180
+    const edgeIdx = (20 * w + 12) * 4;
+    expect(stitched[edgeIdx]).toBeLessThanOrEqual(26);
+    expect(stitched[edgeIdx + 1]).toBeLessThanOrEqual(36);
+    expect(stitched[edgeIdx + 2]).toBeLessThanOrEqual(46);
+    expect(stitched[edgeIdx + 3]).toBe(180);
+
+    // 遮罩外像素仍逐字节无损
+    expect(Array.from(stitched.slice(0, 4))).toEqual([20, 30, 40, 180]);
+
+    // computeCropWindowFromBounds 与直接扫描全图的结果一致
+    const byBounds = computeCropWindowFromBounds(w, h, { x: 12, y: 12, width: 16, height: 16 }, 32);
+    const byMask = computeCropWindow(w, h, mask, 32);
+    expect(byBounds).toEqual(byMask);
   });
 });
 

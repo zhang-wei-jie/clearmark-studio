@@ -1,7 +1,4 @@
-import {
-  WATERMARK_TEMPLATES,
-  sampleTemplateAlpha,
-} from '../engines/fast/templates';
+import { WATERMARK_TEMPLATES, sampleTemplateAlpha } from '../engines/fast/templates';
 import type { DemoSampleMeta, WatermarkTemplateId } from '../types';
 
 /** 内置 3 张纯 Canvas 程序化演示样图元信息（使用真实平台标定模板合成角标，随时可体验精准识别与无痕修复） */
@@ -25,7 +22,7 @@ export const DEMO_SAMPLES: ReadonlyArray<DemoSampleMeta> = [
     recommendedPresetId: 'kling-br',
   },
   {
-    id: 'minimal-arch-kling-dual',
+    id: 'minimal-arch-doubao',
     title: '极简光影建筑（豆包AI生成水印）',
     subtitle: '现代极简光影与建筑纹理 · 右下角真实「豆包AI生成」描边角标',
     fileName: '极简光影建筑_豆包AI生成.png',
@@ -365,7 +362,7 @@ function drawSunsetMountainsSample(ctx: CanvasRenderingContext2D, w: number, h: 
   stampRealTemplateWatermark(ctx, w, h, 'kling');
 }
 
-/** 3. 绘制「极简光影建筑（KLING双角水印）」 1024×1024 */
+/** 3. 绘制「极简光影建筑（豆包AI生成水印）」 1024×1024 */
 function drawMinimalArchSample(ctx: CanvasRenderingContext2D, w: number, h: number): void {
   const rand = createSeededRandom(202603);
 
@@ -395,7 +392,7 @@ function drawMinimalArchSample(ctx: CanvasRenderingContext2D, w: number, h: numb
   ctx.closePath();
   ctx.fill();
 
-  // 左上角深色屋檐投影（衬托「AI生成」浅色文字）
+  // 左上角深色屋檐投影（增强建筑明暗构图层次）
   const eaveGrad = ctx.createLinearGradient(0, 0, w * 0.4, h * 0.24);
   eaveGrad.addColorStop(0, '#1e293b');
   eaveGrad.addColorStop(1, '#334155');
@@ -510,7 +507,7 @@ export function renderDemoSampleToCanvas(id: string): HTMLCanvasElement {
     case 'sunset-mountains-kling':
       drawSunsetMountainsSample(ctx, meta.width, meta.height);
       break;
-    case 'minimal-arch-kling-dual':
+    case 'minimal-arch-doubao':
       drawMinimalArchSample(ctx, meta.width, meta.height);
       break;
   }

@@ -12,10 +12,21 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useState } from 'react';
-import { useAppStore } from '../store/useAppStore';
+import { useMemo, useState } from 'react';
+import { shallowEqual, useAppActions, useAppSelector, type AppState } from '../store/useAppStore';
 import type { ImageItem } from '../types';
-import { hasMaskPixels } from '../utils/maskUtils';
+
+const selectBatchDockState = (s: AppState) => ({
+  images: s.images,
+  activeImageId: s.activeImageId,
+  selectedPresetId: s.selectedPresetId,
+  batchProgress: s.batchProgress,
+  isProcessing: s.isProcessing,
+  isDetecting: s.isDetecting,
+  isRefiningMask: s.isRefiningMask,
+  isExporting: s.isExporting,
+  zipExportProgress: s.zipExportProgress,
+});
 
 interface BatchQueueDockProps {
   onTriggerFilePicker: () => void;
@@ -67,9 +78,8 @@ function StatusBadge({ status }: { status: ImageItem['status'] }) {
 
 /** 底部可折叠多图批量处理队列栏 */
 export function BatchQueueDock({ onTriggerFilePicker }: BatchQueueDockProps) {
+  const state = useAppSelector(selectBatchDockState, shallowEqual);
   const {
-    state,
-    activeImage,
     selectImage,
     removeImage,
     clearImages,
@@ -78,15 +88,27 @@ export function BatchQueueDock({ onTriggerFilePicker }: BatchQueueDockProps) {
     processBatchImages,
     cancelProcessing,
     exportAllAsZip,
-  } = useAppStore();
+  } = useAppActions();
+
+  const activeImage = useMemo(
+    () => state.images.find((item) => item.id === state.activeImageId) ?? null,
+    [state.images, state.activeImageId],
+  );
 
   const [collapsed, setCollapsed] = useState(false);
 
   const totalCount = state.images.length;
-  const doneCount = state.images.filter((item) => item.processed).length;
-  const markedCount = state.images.filter(
-    (item) => hasMaskPixels(item.maskBytes) || item.activePresetBox !== null,
-  ).length;
+  // Store 严格保证空遮罩存为 null，直接 O(N) 判断避免每次渲染全图遍历 4K 遮罩字节数组
+  const { doneCount, markedCount } = useMemo(() => {
+    let done = 0;
+    let marked = 0;
+    for (const item of state.images) {
+      if (item.processed) done += 1;
+      if (item.maskBytes !== null || item.activePresetBox !== null) marked += 1;
+    }
+    return { doneCount: done, markedCount: marked };
+  }, [state.images]);
+  const zipOnlyProcessed = doneCount > 0 && doneCount < totalCount;
 
   const batch = state.batchProgress;
   const batchPercent =
@@ -194,7 +216,12 @@ export function BatchQueueDock({ onTriggerFilePicker }: BatchQueueDockProps) {
           <button
             type="button"
             onClick={applyActiveMaskToAll}
-            disabled={state.isProcessing || (!activeImage && !state.selectedPresetId)}
+            disabled={
+              state.isProcessing ||
+              state.isDetecting ||
+              state.isRefiningMask ||
+              (!activeImage && !state.selectedPresetId)
+            }
             className="inline-flex cursor-pointer items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-surface)] disabled:cursor-not-allowed disabled:opacity-40"
             style={{
               backgroundColor: 'var(--bg-panel-elevated)',
@@ -209,7 +236,7 @@ export function BatchQueueDock({ onTriggerFilePicker }: BatchQueueDockProps) {
           <button
             type="button"
             onClick={() => void autoDetectAll()}
-            disabled={state.isDetecting || state.isProcessing}
+            disabled={state.isDetecting || state.isRefiningMask || state.isProcessing}
             className="inline-flex cursor-pointer items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-surface)] disabled:cursor-not-allowed disabled:opacity-40"
             style={{
               backgroundColor: 'var(--bg-panel-elevated)',
@@ -264,13 +291,19 @@ export function BatchQueueDock({ onTriggerFilePicker }: BatchQueueDockProps) {
             <button
               type="button"
               onClick={() => void processBatchImages()}
-              disabled={state.isProcessing || markedCount === 0}
+              disabled={
+                state.isProcessing || state.isDetecting || state.isRefiningMask || markedCount === 0
+              }
               className="inline-flex cursor-pointer items-center gap-1 rounded-lg px-3 py-1 text-[11px] font-semibold text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45"
               style={{ backgroundColor: 'var(--accent)' }}
               title={
-                markedCount > 0
-                  ? `批量去除已标记的 ${markedCount} 张图片水印`
-                  : '请先使用「预设/选区应用到全部」或「全部自动检测」标记水印区域'
+                state.isDetecting
+                  ? '正在扫描队列角落水印，请等待全部检测完成'
+                  : state.isRefiningMask
+                    ? '正在提取水印笔画，请稍候完成'
+                    : markedCount > 0
+                      ? `批量去除已标记的 ${markedCount} 张图片水印`
+                      : '请先使用「预设/选区应用到全部」或「全部自动检测」标记水印区域'
               }
             >
               <Play className="h-3 w-3 fill-current" />
@@ -280,14 +313,18 @@ export function BatchQueueDock({ onTriggerFilePicker }: BatchQueueDockProps) {
 
           <button
             type="button"
-            onClick={() => void exportAllAsZip(false)}
+            onClick={() => void exportAllAsZip(zipOnlyProcessed)}
             disabled={state.isExporting || state.isProcessing}
             className="inline-flex cursor-pointer items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-surface)] disabled:cursor-not-allowed disabled:opacity-40"
             style={{
               backgroundColor: 'var(--bg-panel-elevated)',
               borderColor: 'var(--border-subtle)',
             }}
-            title="将队列中所有图片按原分辨率打包下载为 ZIP"
+            title={
+              zipOnlyProcessed
+                ? `仅将已完成去水印的 ${doneCount} 张图片按原分辨率打包下载为 ZIP`
+                : '将队列中所有图片按原分辨率打包下载为 ZIP'
+            }
           >
             {state.zipExportProgress ? (
               <>
@@ -299,7 +336,7 @@ export function BatchQueueDock({ onTriggerFilePicker }: BatchQueueDockProps) {
             ) : (
               <>
                 <Archive className="h-3.5 w-3.5 text-[var(--success)]" />
-                <span>打包下载 ZIP</span>
+                <span>{zipOnlyProcessed ? `打包已修复 ZIP (${doneCount})` : '打包下载 ZIP'}</span>
               </>
             )}
           </button>
@@ -311,75 +348,70 @@ export function BatchQueueDock({ onTriggerFilePicker }: BatchQueueDockProps) {
         <div className="flex items-center gap-2 overflow-x-auto px-3 py-2">
           {state.images.map((item) => {
             const isSelected = item.id === state.activeImageId;
-            const hasMask = hasMaskPixels(item.maskBytes) || item.activePresetBox !== null;
+            const hasMask = item.maskBytes !== null || item.activePresetBox !== null;
 
             return (
               <div
                 key={item.id}
-                onClick={() => selectImage(item.id)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    selectImage(item.id);
-                  }
-                }}
-                className="group relative flex w-[136px] shrink-0 cursor-pointer flex-col overflow-hidden rounded-xl border transition-all"
+                className="group relative flex w-[136px] shrink-0 flex-col overflow-hidden rounded-xl border transition-all"
                 style={{
                   backgroundColor: isSelected ? 'var(--accent-soft)' : 'var(--bg-panel-elevated)',
                   borderColor: isSelected ? 'var(--accent)' : 'var(--border-subtle)',
                   boxShadow: isSelected ? 'var(--shadow-sm)' : 'none',
                 }}
               >
-                <div className="bg-checkerboard-sm relative h-[64px] w-full overflow-hidden">
-                  <img
-                    src={item.currentDataUrl}
-                    alt={item.name}
-                    className="h-full w-full object-cover"
-                    loading="lazy"
-                  />
+                <button
+                  type="button"
+                  onClick={() => selectImage(item.id)}
+                  className="flex w-full cursor-pointer flex-col text-left"
+                  aria-pressed={isSelected}
+                >
+                  <div className="bg-checkerboard-sm relative h-[64px] w-full overflow-hidden">
+                    <img
+                      src={item.currentDataUrl}
+                      alt={item.name}
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                    />
 
-                  {/* 左下角状态徽标 */}
-                  <div className="absolute bottom-1 left-1">
-                    <StatusBadge status={item.status} />
+                    {/* 左下角状态徽标 */}
+                    <div className="absolute bottom-1 left-1">
+                      <StatusBadge status={item.status} />
+                    </div>
+
+                    {/* 右下角已标记选区指示点 */}
+                    {hasMask && (
+                      <span
+                        className="absolute right-1 bottom-1 rounded px-1 py-0.5 text-[9px] font-medium text-white"
+                        style={{ backgroundColor: 'rgba(244, 63, 94, 0.88)' }}
+                        title="已标记水印选区"
+                      >
+                        已标选区
+                      </span>
+                    )}
                   </div>
 
-                  {/* 右下角已标记选区指示点 */}
-                  {hasMask && (
-                    <span
-                      className="absolute right-1 bottom-1 rounded px-1 py-0.5 text-[9px] font-medium text-white"
-                      style={{ backgroundColor: 'rgba(244, 63, 94, 0.88)' }}
-                      title="已标记水印选区"
-                    >
-                      已标选区
+                  <div className="flex items-center justify-between gap-1 px-2 py-1">
+                    <span className="truncate text-[11px] font-medium text-[var(--text-primary)]">
+                      {item.name}
                     </span>
-                  )}
+                    <span className="shrink-0 font-mono text-[9px] text-[var(--text-muted)]">
+                      {item.width}×{item.height}
+                    </span>
+                  </div>
+                </button>
 
-                  {/* 右上角单项删除按钮 */}
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeImage(item.id);
-                    }}
-                    disabled={state.isProcessing}
-                    className="absolute top-1 right-1 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/65 text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-[var(--danger)] disabled:hidden"
-                    title={`从队列移除 ${item.name}`}
-                    aria-label={`移除 ${item.name}`}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </div>
-
-                <div className="flex items-center justify-between gap-1 px-2 py-1">
-                  <span className="truncate text-[11px] font-medium text-[var(--text-primary)]">
-                    {item.name}
-                  </span>
-                  <span className="shrink-0 font-mono text-[9px] text-[var(--text-muted)]">
-                    {item.width}×{item.height}
-                  </span>
-                </div>
+                {/* 右上角单项删除按钮（与主选择按钮同级，符合 ARIA 交互元素不嵌套规范） */}
+                <button
+                  type="button"
+                  onClick={() => removeImage(item.id)}
+                  disabled={state.isProcessing}
+                  className="absolute top-1 right-1 z-10 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/65 text-white opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-[var(--danger)] disabled:hidden"
+                  title={`从队列移除 ${item.name}`}
+                  aria-label={`移除 ${item.name}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
               </div>
             );
           })}
